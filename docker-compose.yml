@@ -1,0 +1,17 @@
+services:
+  downloader:
+    build: .
+    container_name: navidrome-media-dl
+    restart: unless-stopped
+    environment:
+      MUSIC_ROOT: /music
+      STATE_DIR: /state
+      QUEUE_DIR: /queue
+      DOWNLOAD_DIR: /downloads
+      AUDIO_FORMAT: m4a
+      POLL_SECONDS: 5
+    volumes:
+      - ${NAVIDROME_MUSIC_ROOT:-./music}:/music
+      - ${MEDIA_DL_STATE:-./state}:/state
+      - ${MEDIA_DL_QUEUE:-./queue}:/queue
+      - ${MEDIA_DL_DOWNLOADS:-./downloads}:/downloads

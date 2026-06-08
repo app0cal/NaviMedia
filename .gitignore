@@ -1,0 +1,16 @@
+src/media_dl/__pycache__/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.env
+.venv/
+build/
+dist/
+*.egg-info/
+
+music/
+queue/
+state/
+downloads/
