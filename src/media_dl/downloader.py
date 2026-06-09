@@ -20,9 +20,15 @@ class Downloader:
 
     def command_for(self, job: Job) -> list[str]:
         if job.source == Source.YOUTUBE:
-            return self.youtube_command(job.normalized_url)
+            return self.youtube_command(
+                job.normalized_url,
+                duplicate_job_id=job.id if job.allow_duplicate else None,
+            )
         if job.source == Source.SPOTIFY:
-            return self.spotify_command(job.normalized_url)
+            return self.spotify_command(
+                job.normalized_url,
+                duplicate_job_id=job.id if job.allow_duplicate else None,
+            )
         raise ValueError(f"unsupported source: {job.source}")
 
     def run(self, job: Job) -> DownloadResult:
@@ -37,16 +43,25 @@ class Downloader:
         if completed.returncode != 0:
             raise RuntimeError(completed.stdout.strip() or f"command failed: {command[0]}")
 
-        return DownloadResult(output_path=self.output_root_for(job.source))
+        return DownloadResult(
+            output_path=self.output_root_for(
+                job.source,
+                duplicate_job_id=job.id if job.allow_duplicate else None,
+            )
+        )
 
-    def youtube_command(self, url: str) -> list[str]:
+    def youtube_command(self, url: str, duplicate_job_id: int | None = None) -> list[str]:
+        output_root = (
+            self.config.music_root / "Duplicates" / str(duplicate_job_id) / "YouTube"
+            if duplicate_job_id is not None
+            else self.config.music_root / "YouTube"
+        )
         output = str(
-            self.config.music_root
-            / "YouTube"
+            output_root
             / "%(playlist,uploader)s"
             / "%(playlist_index&{} - |)s%(title)s.%(ext)s"
         )
-        return [
+        command = [
             self.config.yt_dlp_bin,
             "--ignore-errors",
             "--yes-playlist",
@@ -57,19 +72,33 @@ class Downloader:
             "--embed-thumbnail",
             "--js-runtimes",
             "deno",
-            "--download-archive",
-            str(self.config.yt_archive_path),
+        ]
+        if duplicate_job_id is None:
+            command.extend(
+                [
+                    "--download-archive",
+                    str(self.config.yt_archive_path),
+                ]
+            )
+        command.extend(
+            [
             "--paths",
             f"temp:{self.config.tmp_dir}",
             "--output",
             output,
             url,
-        ]
+            ]
+        )
+        return command
 
-    def spotify_command(self, url: str) -> list[str]:
+    def spotify_command(self, url: str, duplicate_job_id: int | None = None) -> list[str]:
+        output_root = (
+            self.config.music_root / "Duplicates" / str(duplicate_job_id) / "Spotify"
+            if duplicate_job_id is not None
+            else self.config.music_root / "Spotify"
+        )
         output = str(
-            self.config.music_root
-            / "Spotify"
+            output_root
             / "{album-artist}"
             / "{album}"
             / "{track-number} - {title}.{output-ext}"
@@ -86,7 +115,9 @@ class Downloader:
             output,
         ]
 
-    def output_root_for(self, source: Source) -> Path:
+    def output_root_for(self, source: Source, duplicate_job_id: int | None = None) -> Path:
+        if duplicate_job_id is not None:
+            return self.config.music_root / "Duplicates" / str(duplicate_job_id)
         if source == Source.YOUTUBE:
             return self.config.music_root / "YouTube"
         if source == Source.SPOTIFY:

@@ -29,6 +29,15 @@ def test_youtube_command_contains_playlist_archive_and_metadata(tmp_path):
     assert "https://youtube.com/playlist?list=PL123" == command[-1]
 
 
+def test_duplicate_youtube_command_omits_archive_and_uses_duplicate_path(tmp_path):
+    downloader = Downloader(config(tmp_path))
+    command = downloader.youtube_command("https://youtube.com/watch?v=abc", duplicate_job_id=42)
+
+    assert "--download-archive" not in command
+    duplicate_root = str(tmp_path / "music" / "Duplicates" / "42" / "YouTube")
+    assert any(duplicate_root in arg for arg in command)
+
+
 def test_spotify_command_uses_spotdl_m4a_without_transcoding(tmp_path):
     downloader = Downloader(config(tmp_path))
     command = downloader.spotify_command("https://open.spotify.com/playlist/abc")
@@ -38,6 +47,14 @@ def test_spotify_command_uses_spotdl_m4a_without_transcoding(tmp_path):
     assert "m4a" in command
     assert "--bitrate" in command
     assert "disable" in command
+
+
+def test_duplicate_spotify_command_uses_duplicate_path(tmp_path):
+    downloader = Downloader(config(tmp_path))
+    command = downloader.spotify_command("https://open.spotify.com/playlist/abc", duplicate_job_id=42)
+
+    duplicate_root = str(tmp_path / "music" / "Duplicates" / "42" / "Spotify")
+    assert any(duplicate_root in arg for arg in command)
 
 
 def test_command_for_rejects_unknown_source(tmp_path):
@@ -51,6 +68,9 @@ def test_command_for_rejects_unknown_source(tmp_path):
         attempts=0,
         last_error=None,
         output_path=None,
+        dedupe_key="normalized",
+        duplicate_of=None,
+        allow_duplicate=False,
     )
 
     try:

@@ -13,6 +13,18 @@ This project stores audio only in the current implementation. YouTube links are 
 /downloads   temporary files and logs
 ```
 
+The long-running Docker service exposes a localhost-only runtime API at:
+
+```text
+http://127.0.0.1:8765
+```
+
+The same address serves the web dashboard. If you set `SERVICE_PORT` in `.env`, open that port instead:
+
+```text
+http://127.0.0.1:${SERVICE_PORT}
+```
+
 Default output:
 
 ```text
@@ -38,9 +50,9 @@ docker compose up -d --build
 
 Navidrome should mount the same host folder read-only or read-write as its music library.
 
-## Queue Links
+## Queue Files
 
-Paste links into any of these files:
+Queue files are available for manual import, but the long-running service does not poll them automatically. Paste links into any of these files:
 
 ```text
 queue/inbox.txt
@@ -49,7 +61,6 @@ queue/spotify.txt
 ```
 
 Each non-empty, non-comment line is imported. Duplicate normalized URLs are skipped.
-The daemon checks queue files every 5 seconds by default.
 
 ## CLI
 
@@ -57,16 +68,38 @@ The daemon checks queue files every 5 seconds by default.
 docker compose run --rm downloader add "https://youtube.com/watch?v=..."
 docker compose run --rm downloader add "https://youtube.com/playlist?list=..."
 docker compose run --rm downloader add "https://open.spotify.com/playlist/..."
+docker compose run --rm downloader add --allow-duplicate "https://youtube.com/watch?v=..."
 docker compose run --rm downloader status
 docker compose run --rm downloader retry 12
 docker compose run --rm downloader skip 12 --reason "video unavailable"
 ```
 
-`add` and `retry` process their target job immediately by default. Use `--queue-only` if you want to stage work for the daemon instead:
+`add` and `retry` process their target job immediately by default. Use `--queue-only` if you want to stage work for a later manual run:
 
 ```bash
 docker compose run --rm downloader add --queue-only "https://youtube.com/watch?v=..."
 docker compose run --rm downloader run-once
+```
+
+Normal `add` deduplicates by normalized URL. `add --allow-duplicate` creates a separate job for the same URL and stores its output under `/music/Duplicates/<job-id>/`.
+
+## Runtime API
+
+The service starts with `media-dl serve`, which runs the localhost web dashboard and API on the same Compose port. Downloads happen only when a CLI command, web action, or API request asks for work.
+
+Open the dashboard:
+
+```bash
+xdg-open http://127.0.0.1:8765
+```
+
+The dashboard can submit URLs, import queue files, manually run one queued job, retry, skip, and refresh recent job state. The left-side audio format control persists to `/state/runtime-settings.json` and supports `m4a`, `mp3`, `flac`, `opus`, and `wav`. The "Allow duplicate redownload" toggle maps to `allow_duplicate`; leave it off to dedupe by normalized URL, or turn it on to create a separate tracked duplicate job.
+
+```bash
+curl http://127.0.0.1:8765/api/health
+curl http://127.0.0.1:8765/api/runtime
+curl http://127.0.0.1:8765/api/jobs
+curl http://127.0.0.1:8765/api/settings
 ```
 
 ## Notes

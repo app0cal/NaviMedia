@@ -4,10 +4,16 @@ import argparse
 import sys
 
 from media_dl.config import load_config
-from media_dl.db import Database
-from media_dl.queue import import_queue
-from media_dl.urltools import Source, classify_url
-from media_dl.worker import process_job, run_once, watch
+from media_dl.jobs import (
+    UnsupportedUrlError,
+    add_url,
+    import_queue_files,
+    list_recent_jobs,
+    retry_job,
+    run_queued_jobs,
+    skip_job,
+)
+from media_dl.worker import watch
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -20,6 +26,11 @@ def main(argv: list[str] | None = None) -> int:
         "--queue-only",
         action="store_true",
         help="queue the URL without immediately processing it",
+    )
+    add.add_argument(
+        "--allow-duplicate",
+        action="store_true",
+        help="create a new job even if this URL was already submitted",
     )
 
     sub.add_parser("import-queue", help="import watched queue files without running jobs")
@@ -43,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     skip.add_argument("--reason", default="manually skipped")
 
     sub.add_parser("watch", help="poll queue files and process jobs")
+    sub.add_parser("serve", help="serve localhost API")
 
     args = parser.parse_args(argv)
     config = load_config()
@@ -52,73 +64,73 @@ def main(argv: list[str] | None = None) -> int:
         watch(config)
         return 0
 
-    db = Database(config.db_path)
-    try:
-        if args.command == "add":
-            classified = classify_url(args.url)
-            if classified.source == Source.UNKNOWN:
-                print(f"unsupported url: {args.url}", file=sys.stderr)
-                return 2
-            job, created = db.add_job(
-                classified.source,
-                classified.raw_url,
-                classified.normalized_url,
-            )
-            verb = "queued" if created else "duplicate"
-            print(f"{verb}: job {job.id} {job.source.value} {job.normalized_url}")
-            if args.queue_only or job.status not in {"queued", "retry"}:
-                return 0
+    if args.command == "serve":
+        from media_dl.service import serve
 
-            db.close()
-            processed = process_job(config, job.id)
-            print(f"processed: job {processed.id} {processed.status}")
-            return 1 if processed.status == "failed" else 0
+        serve(config)
+        return 0
 
-        if args.command == "import-queue":
-            results = import_queue(config.queue_dir, db)
-            for job, created, error in results:
-                if error:
-                    print(error, file=sys.stderr)
-                elif job:
-                    verb = "queued" if created else "duplicate"
-                    print(f"{verb}: job {job.id} {job.source.value} {job.normalized_url}")
-            return 0
-
-        if args.command == "run-once":
-            db.close()
-            processed = run_once(config, max_jobs=args.max_jobs)
-            print(f"processed {processed} job(s)")
-            return 0
-
-        if args.command == "status":
-            for job in db.list_jobs(limit=args.limit):
-                error = f" error={job.last_error}" if job.last_error else ""
-                print(
-                    f"{job.id:4} {job.source.value:7} {job.status:9} "
-                    f"attempts={job.attempts} {job.normalized_url}{error}"
-                )
-            return 0
-
-        if args.command == "retry":
-            job = db.retry(args.job_id)
-            print(f"retry queued: job {job.id}")
-            if args.queue_only:
-                return 0
-
-            db.close()
-            processed = process_job(config, job.id)
-            print(f"processed: job {processed.id} {processed.status}")
-            return 1 if processed.status == "failed" else 0
-
-        if args.command == "skip":
-            job = db.skip(args.job_id, args.reason)
-            print(f"skipped: job {job.id}")
-            return 0
-    finally:
+    if args.command == "add":
         try:
-            db.close()
-        except Exception:
-            pass
+            result = add_url(
+                config,
+                args.url,
+                queue_only=args.queue_only,
+                allow_duplicate=args.allow_duplicate,
+            )
+        except UnsupportedUrlError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        verb = "queued" if result.created else "duplicate"
+        if result.created and result.job.allow_duplicate:
+            verb = "queued duplicate"
+        print(f"{verb}: job {result.job.id} {result.job.source.value} {result.job.normalized_url}")
+        if result.processed:
+            print(f"processed: job {result.processed.id} {result.processed.status}")
+            return 1 if result.processed.status == "failed" else 0
+        return 0
+
+    if args.command == "import-queue":
+        results = import_queue_files(config)
+        for job, created, error in results:
+            if error:
+                print(error, file=sys.stderr)
+            elif job:
+                verb = "queued" if created else "duplicate"
+                print(f"{verb}: job {job.id} {job.source.value} {job.normalized_url}")
+        return 0
+
+    if args.command == "run-once":
+        processed = run_queued_jobs(config, max_jobs=args.max_jobs)
+        print(f"processed {processed} job(s)")
+        return 0
+
+    if args.command == "status":
+        for job in list_recent_jobs(config, limit=args.limit):
+            error = f" error={job.last_error}" if job.last_error else ""
+            duplicate = (
+                f" duplicate_of={job.duplicate_of}"
+                if job.allow_duplicate and job.duplicate_of is not None
+                else ""
+            )
+            print(
+                f"{job.id:4} {job.source.value:7} {job.status:9} "
+                f"attempts={job.attempts}{duplicate} {job.normalized_url}{error}"
+            )
+        return 0
+
+    if args.command == "retry":
+        result = retry_job(config, args.job_id, queue_only=args.queue_only)
+        print(f"retry queued: job {result.job.id}")
+        if result.processed:
+            print(f"processed: job {result.processed.id} {result.processed.status}")
+            return 1 if result.processed.status == "failed" else 0
+        return 0
+
+    if args.command == "skip":
+        job = skip_job(config, args.job_id, args.reason)
+        print(f"skipped: job {job.id}")
+        return 0
 
     parser.error(f"unknown command {args.command}")
     return 2

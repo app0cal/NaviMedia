@@ -15,6 +15,7 @@ class Config:
     poll_seconds: int = 5
     yt_dlp_bin: str = "yt-dlp"
     spotdl_bin: str = "spotdl"
+    service_port: int = 8765
 
     @property
     def db_path(self) -> Path:
@@ -51,4 +52,5 @@ def load_config() -> Config:
         poll_seconds=int(os.getenv("POLL_SECONDS", "5")),
         yt_dlp_bin=os.getenv("YT_DLP_BIN", "yt-dlp"),
         spotdl_bin=os.getenv("SPOTDL_BIN", "spotdl"),
+        service_port=int(os.getenv("SERVICE_PORT", "8765")),
     )

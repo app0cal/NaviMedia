@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable
+from uuid import uuid4
 
 from media_dl.urltools import Source
 
@@ -19,6 +20,9 @@ class Job:
     attempts: int
     last_error: str | None
     output_path: str | None
+    dedupe_key: str
+    duplicate_of: int | None
+    allow_duplicate: bool
 
 
 class Database:
@@ -33,13 +37,42 @@ class Database:
         self.conn.close()
 
     def migrate(self) -> None:
+        row = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+        ).fetchone()
+        if row is None:
+            self._create_schema()
+            return
+
+        table_sql = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'jobs'"
+        ).fetchone()["sql"]
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        needs_rebuild = (
+            "normalized_url TEXT NOT NULL UNIQUE" in table_sql
+            or "dedupe_key" not in columns
+            or "duplicate_of" not in columns
+            or "allow_duplicate" not in columns
+        )
+        if needs_rebuild:
+            self._rebuild_jobs_table(columns)
+        self._create_indexes()
+        self.conn.commit()
+
+    def _create_schema(self) -> None:
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source TEXT NOT NULL,
                 raw_url TEXT NOT NULL,
-                normalized_url TEXT NOT NULL UNIQUE,
+                normalized_url TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                duplicate_of INTEGER,
+                allow_duplicate INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
                 first_seen TEXT NOT NULL,
@@ -49,32 +82,118 @@ class Database:
                 last_error TEXT,
                 output_path TEXT
             );
+            """
+        )
+        self._create_indexes()
+        self.conn.commit()
 
+    def _create_indexes(self) -> None:
+        self.conn.executescript(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_dedupe_key ON jobs(dedupe_key);
+            CREATE INDEX IF NOT EXISTS idx_jobs_normalized_url ON jobs(normalized_url);
             CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
             CREATE INDEX IF NOT EXISTS idx_jobs_source ON jobs(source);
             """
         )
-        self.conn.commit()
 
-    def add_job(self, source: Source, raw_url: str, normalized_url: str) -> tuple[Job, bool]:
+    def _rebuild_jobs_table(self, columns: set[str]) -> None:
+        self.conn.executescript(
+            """
+            DROP TABLE IF EXISTS jobs_new;
+            CREATE TABLE jobs_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                raw_url TEXT NOT NULL,
+                normalized_url TEXT NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                duplicate_of INTEGER,
+                allow_duplicate INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                first_seen TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                last_error TEXT,
+                output_path TEXT
+            );
+            """
+        )
+
+        has_dedupe = "dedupe_key" in columns
+        has_duplicate_of = "duplicate_of" in columns
+        has_allow_duplicate = "allow_duplicate" in columns
+        dedupe_expr = "dedupe_key" if has_dedupe else "normalized_url"
+        duplicate_expr = "duplicate_of" if has_duplicate_of else "NULL"
+        allow_expr = "allow_duplicate" if has_allow_duplicate else "0"
+
+        self.conn.execute(
+            f"""
+            INSERT INTO jobs_new (
+                id, source, raw_url, normalized_url, dedupe_key, duplicate_of,
+                allow_duplicate, status, attempts, first_seen, last_seen,
+                started_at, finished_at, last_error, output_path
+            )
+            SELECT
+                id, source, raw_url, normalized_url, {dedupe_expr}, {duplicate_expr},
+                {allow_expr}, status, attempts, first_seen, last_seen,
+                started_at, finished_at, last_error, output_path
+            FROM jobs
+            """
+        )
+        self.conn.executescript(
+            """
+            DROP TABLE jobs;
+            ALTER TABLE jobs_new RENAME TO jobs;
+            """
+        )
+
+    def add_job(
+        self,
+        source: Source,
+        raw_url: str,
+        normalized_url: str,
+        allow_duplicate: bool = False,
+    ) -> tuple[Job, bool]:
         now = _now()
+        duplicate_of = self._first_job_id_for_url(normalized_url) if allow_duplicate else None
+        dedupe_key = (
+            f"{normalized_url}#duplicate:{uuid4().hex}"
+            if allow_duplicate
+            else normalized_url
+        )
         try:
             cur = self.conn.execute(
                 """
-                INSERT INTO jobs (source, raw_url, normalized_url, status, first_seen, last_seen)
-                VALUES (?, ?, ?, 'queued', ?, ?)
+                INSERT INTO jobs (
+                    source, raw_url, normalized_url, dedupe_key, duplicate_of,
+                    allow_duplicate, status, first_seen, last_seen
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
                 """,
-                (source.value, raw_url, normalized_url, now, now),
+                (
+                    source.value,
+                    raw_url,
+                    normalized_url,
+                    dedupe_key,
+                    duplicate_of,
+                    1 if allow_duplicate else 0,
+                    now,
+                    now,
+                ),
             )
             self.conn.commit()
             return self.get_job(cur.lastrowid), True
         except sqlite3.IntegrityError:
+            if allow_duplicate:
+                raise
             self.conn.execute(
-                "UPDATE jobs SET last_seen = ? WHERE normalized_url = ?",
+                "UPDATE jobs SET last_seen = ? WHERE dedupe_key = ?",
                 (now, normalized_url),
             )
             self.conn.commit()
-            return self.get_by_normalized_url(normalized_url), False
+            return self.get_by_dedupe_key(normalized_url), False
 
     def get_job(self, job_id: int) -> Job:
         row = self.conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
@@ -84,12 +203,38 @@ class Database:
 
     def get_by_normalized_url(self, normalized_url: str) -> Job:
         row = self.conn.execute(
-            "SELECT * FROM jobs WHERE normalized_url = ?",
+            """
+            SELECT * FROM jobs
+            WHERE normalized_url = ?
+            ORDER BY allow_duplicate ASC, id ASC
+            LIMIT 1
+            """,
             (normalized_url,),
         ).fetchone()
         if row is None:
             raise KeyError(f"url {normalized_url} not found")
         return _row_to_job(row)
+
+    def get_by_dedupe_key(self, dedupe_key: str) -> Job:
+        row = self.conn.execute(
+            "SELECT * FROM jobs WHERE dedupe_key = ?",
+            (dedupe_key,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"dedupe key {dedupe_key} not found")
+        return _row_to_job(row)
+
+    def _first_job_id_for_url(self, normalized_url: str) -> int | None:
+        row = self.conn.execute(
+            """
+            SELECT id FROM jobs
+            WHERE normalized_url = ?
+            ORDER BY allow_duplicate ASC, id ASC
+            LIMIT 1
+            """,
+            (normalized_url,),
+        ).fetchone()
+        return row["id"] if row else None
 
     def list_jobs(self, statuses: Iterable[str] | None = None, limit: int = 50) -> list[Job]:
         if statuses:
@@ -191,6 +336,9 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         attempts=row["attempts"],
         last_error=row["last_error"],
         output_path=row["output_path"],
+        dedupe_key=row["dedupe_key"],
+        duplicate_of=row["duplicate_of"],
+        allow_duplicate=bool(row["allow_duplicate"]),
     )
 
 

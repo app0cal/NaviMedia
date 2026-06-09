@@ -1,7 +1,9 @@
 from media_dl.config import Config
 from media_dl.db import Database
+from media_dl.downloader import DownloadResult
 from media_dl.urltools import Source
 from media_dl.worker import process_job
+from media_dl.runtime_settings import save_runtime_settings
 
 
 def test_process_job_ignores_completed_job(tmp_path):
@@ -20,3 +22,31 @@ def test_process_job_ignores_completed_job(tmp_path):
 
     assert processed.status == "complete"
     assert processed.attempts == 0
+
+
+def test_process_job_uses_persisted_audio_format(tmp_path, monkeypatch):
+    cfg = Config(
+        music_root=tmp_path / "music",
+        state_dir=tmp_path / "state",
+        queue_dir=tmp_path / "queue",
+        download_dir=tmp_path / "downloads",
+        yt_dlp_bin="yt-dlp",
+        spotdl_bin="spotdl",
+    )
+    save_runtime_settings(cfg, "opus")
+    db = Database(cfg.db_path)
+    job, _ = db.add_job(Source.YOUTUBE, "raw", "normalized")
+    db.close()
+
+    seen = {}
+
+    def fake_run(self, job):
+        seen["audio_format"] = self.config.audio_format
+        return DownloadResult(output_path=cfg.music_root / "YouTube")
+
+    monkeypatch.setattr("media_dl.downloader.Downloader.run", fake_run)
+
+    processed = process_job(cfg, job.id)
+
+    assert seen["audio_format"] == "opus"
+    assert processed.status == "complete"

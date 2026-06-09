@@ -10,3 +10,5 @@ music/
 queue/
 state/
 downloads/
+web/node_modules/
+web/dist/

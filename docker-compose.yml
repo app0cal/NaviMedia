@@ -9,7 +9,9 @@ services:
       QUEUE_DIR: /queue
       DOWNLOAD_DIR: /downloads
       AUDIO_FORMAT: m4a
-      POLL_SECONDS: 5
+      SERVICE_PORT: ${SERVICE_PORT:-8765}
+    ports:
+      - "127.0.0.1:${SERVICE_PORT:-8765}:${SERVICE_PORT:-8765}"
     volumes:
       - ${NAVIDROME_MUSIC_ROOT:-./music}:/music
       - ${MEDIA_DL_STATE:-./state}:/state

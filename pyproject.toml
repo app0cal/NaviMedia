@@ -3,13 +3,17 @@ name = "navidrome-media-dl"
 version = "0.1.0"
 description = "Queue-based YouTube and Spotify downloader for a Navidrome music folder."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "fastapi>=0.103,<0.104",
+  "uvicorn[standard]>=0.23.2,<0.24",
+]
 
 [project.scripts]
 media-dl = "media_dl.cli:main"
 
 [project.optional-dependencies]
 test = [
+  "httpx>=0.24,<0.28",
   "pytest>=8.0",
 ]
 
@@ -19,6 +23,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+media_dl = ["static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
