@@ -20,8 +20,13 @@ _download_lock = Lock()
 def process_job(config: Config, job_id: int):
     config.ensure_dirs()
     db = Database(config.db_path)
-    runtime_config = replace(config, audio_format=load_runtime_settings(config).audio_format)
-    downloader = Downloader(runtime_config)
+    settings = load_runtime_settings(config)
+    runtime_config = replace(
+        config,
+        audio_format=settings.audio_format,
+        thumbnail_mode=settings.thumbnail_mode,
+    )
+    downloader = Downloader(runtime_config, settings=settings)
 
     try:
         with _exclusive_download(config):
@@ -33,8 +38,13 @@ def process_job(config: Config, job_id: int):
 def run_once(config: Config, max_jobs: int | None = None) -> int:
     config.ensure_dirs()
     db = Database(config.db_path)
-    runtime_config = replace(config, audio_format=load_runtime_settings(config).audio_format)
-    downloader = Downloader(runtime_config)
+    settings = load_runtime_settings(config)
+    runtime_config = replace(
+        config,
+        audio_format=settings.audio_format,
+        thumbnail_mode=settings.thumbnail_mode,
+    )
+    downloader = Downloader(runtime_config, settings=settings)
     processed = 0
 
     try:
@@ -72,7 +82,7 @@ def _process_job_with_db(db: Database, downloader: Downloader, job_id: int):
     except Exception as exc:
         db.mark_failed(job.id, str(exc))
     else:
-        db.mark_complete(job.id, str(result.output_path))
+        db.mark_complete(job.id, str(result.output_path), warning=result.warning)
     return db.get_job(job.id)
 
 

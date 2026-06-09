@@ -28,6 +28,18 @@ class JobActionResult:
     processed: Job | None
 
 
+@dataclass(frozen=True)
+class JobListResult:
+    jobs: list[Job]
+    limit: int
+    offset: int
+    total: int
+
+    @property
+    def has_more(self) -> bool:
+        return self.offset + len(self.jobs) < self.total
+
+
 def add_url(
     config: Config,
     url: str,
@@ -79,11 +91,16 @@ def skip_job(config: Config, job_id: int, reason: str) -> Job:
         db.close()
 
 
-def list_recent_jobs(config: Config, limit: int = 25) -> list[Job]:
+def list_recent_jobs(config: Config, limit: int = 25, offset: int = 0) -> JobListResult:
     config.ensure_dirs()
     db = Database(config.db_path)
     try:
-        return db.list_jobs(limit=limit)
+        return JobListResult(
+            jobs=db.list_jobs(limit=limit, offset=offset),
+            limit=limit,
+            offset=offset,
+            total=db.count_jobs(),
+        )
     finally:
         db.close()
 

@@ -11,7 +11,10 @@ class Config:
     state_dir: Path
     queue_dir: Path
     download_dir: Path
+    config_dir: Path | None = None
+    default_thumbnail_path: Path | None = None
     audio_format: str = "m4a"
+    thumbnail_mode: str = "source"
     poll_seconds: int = 5
     yt_dlp_bin: str = "yt-dlp"
     spotdl_bin: str = "spotdl"
@@ -29,12 +32,21 @@ class Config:
     def tmp_dir(self) -> Path:
         return self.download_dir / "tmp"
 
+    @property
+    def resolved_config_dir(self) -> Path:
+        return self.config_dir or self.state_dir
+
+    @property
+    def resolved_default_thumbnail_path(self) -> Path:
+        return self.default_thumbnail_path or (self.resolved_config_dir / "default.jpg")
+
     def ensure_dirs(self) -> None:
         for path in (
             self.music_root,
             self.state_dir,
             self.queue_dir,
             self.download_dir,
+            self.resolved_config_dir,
             self.tmp_dir,
             self.music_root / "YouTube",
             self.music_root / "Spotify",
@@ -48,6 +60,10 @@ def load_config() -> Config:
         state_dir=Path(os.getenv("STATE_DIR", "./state")).resolve(),
         queue_dir=Path(os.getenv("QUEUE_DIR", "./queue")).resolve(),
         download_dir=Path(os.getenv("DOWNLOAD_DIR", "./downloads")).resolve(),
+        config_dir=Path(os.getenv("CONFIG_DIR", "./config")).resolve(),
+        default_thumbnail_path=Path(
+            os.getenv("DEFAULT_THUMBNAIL_PATH", "./config/default.jpg")
+        ).resolve(),
         audio_format=os.getenv("AUDIO_FORMAT", "m4a"),
         poll_seconds=int(os.getenv("POLL_SECONDS", "5")),
         yt_dlp_bin=os.getenv("YT_DLP_BIN", "yt-dlp"),

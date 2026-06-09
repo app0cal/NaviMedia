@@ -94,10 +94,13 @@ def test_list_recent_jobs_returns_newest_first(tmp_path):
     first = add_url(cfg, "https://youtube.com/watch?v=abc", queue_only=True)
     second = add_url(cfg, "https://youtube.com/watch?v=def", queue_only=True)
 
-    jobs = list_recent_jobs(cfg)
+    result = list_recent_jobs(cfg)
 
-    assert jobs[0].id == second.job.id
-    assert jobs[1].id == first.job.id
+    assert [job.id for job in result.jobs] == [second.job.id, first.job.id]
+    assert result.limit == 25
+    assert result.offset == 0
+    assert result.total == 2
+    assert result.has_more is False
 
 
 def test_import_queue_files(tmp_path):
@@ -122,4 +125,4 @@ def test_run_queued_jobs(tmp_path):
     processed = run_queued_jobs(cfg, max_jobs=1)
 
     assert processed == 1
-    assert list_recent_jobs(cfg)[0].status == "failed"
+    assert list_recent_jobs(cfg).jobs[0].status == "failed"

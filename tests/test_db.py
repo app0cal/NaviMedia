@@ -92,6 +92,65 @@ def test_migrates_old_unique_normalized_url_schema(tmp_path):
     assert migrated.allow_duplicate is False
     assert created is True
     assert duplicate.duplicate_of == migrated.id
+    assert migrated.last_warning is None
+
+    db.close()
+
+
+def test_migrates_schema_missing_last_warning(tmp_path):
+    db_path = tmp_path / "state.sqlite"
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            raw_url TEXT NOT NULL,
+            normalized_url TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL,
+            duplicate_of INTEGER,
+            allow_duplicate INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            last_error TEXT,
+            output_path TEXT
+        );
+        CREATE UNIQUE INDEX idx_jobs_dedupe_key ON jobs(dedupe_key);
+        INSERT INTO jobs (
+            source, raw_url, normalized_url, dedupe_key, status, first_seen, last_seen
+        )
+        VALUES (
+            'youtube', 'raw', 'normalized', 'normalized', 'complete',
+            '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    job = db.get_by_normalized_url("normalized")
+
+    assert job.last_warning is None
+
+    db.close()
+
+
+def test_list_jobs_paginates_and_counts(tmp_path):
+    db = Database(tmp_path / "state.sqlite")
+    for index in range(5):
+        db.add_job(Source.YOUTUBE, f"raw-{index}", f"normalized-{index}")
+
+    page = db.list_jobs(limit=2, offset=2)
+
+    assert db.count_jobs() == 5
+    assert [job.id for job in page] == [3, 2]
 
     db.close()
 
@@ -121,5 +180,20 @@ def test_skip_removes_job_from_queue(tmp_path):
     assert skipped.status == "skipped"
     assert skipped.last_error == "unavailable"
     assert db.next_queued() is None
+
+    db.close()
+
+
+def test_mark_complete_persists_warning(tmp_path):
+    db = Database(tmp_path / "state.sqlite")
+    job, _ = db.add_job(Source.YOUTUBE, "raw", "normalized")
+
+    db.mark_running(job.id)
+    db.mark_complete(job.id, "output", warning="Some playlist items failed.")
+    completed = db.get_job(job.id)
+
+    assert completed.status == "complete"
+    assert completed.last_warning == "Some playlist items failed."
+    assert completed.last_error is None
 
     db.close()

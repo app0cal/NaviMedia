@@ -106,8 +106,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "status":
-        for job in list_recent_jobs(config, limit=args.limit):
+        for job in list_recent_jobs(config, limit=args.limit).jobs:
             error = f" error={job.last_error}" if job.last_error else ""
+            warning = f" warning={job.last_warning}" if job.last_warning else ""
             duplicate = (
                 f" duplicate_of={job.duplicate_of}"
                 if job.allow_duplicate and job.duplicate_of is not None
@@ -115,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(
                 f"{job.id:4} {job.source.value:7} {job.status:9} "
-                f"attempts={job.attempts}{duplicate} {job.normalized_url}{error}"
+                f"attempts={job.attempts}{duplicate} {job.normalized_url}{error}{warning}"
             )
         return 0
 

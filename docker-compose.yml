@@ -8,6 +8,8 @@ services:
       STATE_DIR: /state
       QUEUE_DIR: /queue
       DOWNLOAD_DIR: /downloads
+      CONFIG_DIR: /config
+      DEFAULT_THUMBNAIL_PATH: /config/default.jpg
       AUDIO_FORMAT: m4a
       SERVICE_PORT: ${SERVICE_PORT:-8765}
     ports:
@@ -17,3 +19,4 @@ services:
       - ${MEDIA_DL_STATE:-./state}:/state
       - ${MEDIA_DL_QUEUE:-./queue}:/queue
       - ${MEDIA_DL_DOWNLOADS:-./downloads}:/downloads
+      - ${NAVIMEDIA_CONFIG:-./config}:/config

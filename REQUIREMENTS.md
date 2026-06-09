@@ -4,11 +4,10 @@
 
 - The long-running Docker service is API-only.
   - It does not poll queue files automatically.
-  - It does not start downloads unless a command or future API request asks it to.
+  - It does not start downloads unless a CLI command, API request, or web UI action asks it to.
   - Queue files remain available for manual import through explicit commands.
 - Downloads are user/action triggered.
-  - Current trigger: container-internal CLI commands such as `add`, `retry`, and `run-once`.
-  - Future trigger: localhost API endpoints called by the web UI or host CLI.
+  - Current triggers: container-internal CLI commands, localhost API endpoints, and the bundled web UI.
 - Docker remains the runtime boundary.
   - Host users should not need to install `yt-dlp`, `spotDL`, `ffmpeg`, Deno, or Python dependencies directly.
   - The service owns downloader dependencies and mounted storage paths.
@@ -32,11 +31,16 @@
 - Runtime endpoints exist.
   - `GET /api/health`
   - `GET /api/runtime`
+- Localhost job API exists.
+  - Add, list, retry, skip, manual run, and explicit queue import are available under `/api`.
+  - Job listing is paginated and bounded.
+  - Immediate processing remains synchronous unless `queue_only` is requested.
 - Current volume model is preserved.
   - `/music`
   - `/state`
   - `/queue`
   - `/downloads`
+  - `/config`
 - Current downloader dependency model is preserved.
   - `yt-dlp`
   - `spotDL`
@@ -55,17 +59,19 @@
   - Spotify URLs.
   - Unsupported URL handling.
 - SQLite job state exists.
-  - Stores raw URL, normalized URL, source, status, attempts, last error, and output path.
+  - Stores URL, source, status, attempts, errors, warnings, output path, dedupe state, and duplicate metadata.
   - Deduplicates by normalized URL.
 - YouTube download command generation exists.
   - Uses `yt-dlp`.
   - Extracts audio.
-  - Embeds metadata and thumbnail.
+  - Embeds source metadata.
+  - Supports source thumbnails, default thumbnail, or no thumbnails.
   - Uses `yt-dlp` archive state.
 - Spotify download command generation exists.
   - Uses `spotDL`.
   - Uses Spotify as catalog/metadata source.
   - Downloads matched audio from YouTube/YouTube Music.
+  - Supports the same thumbnail mode setting where supported by the current post-processing path.
 - Container-internal CLI exists.
   - `add`
   - `status`
@@ -84,6 +90,21 @@
   - `add --allow-duplicate` creates a separate job for the same normalized URL.
   - Forced duplicate output is stored under `/music/Duplicates/<job-id>/`.
   - Forced YouTube duplicates bypass the shared `yt-dlp` archive so the duplicate can actually download.
+- Runtime settings exist.
+  - Audio format can be changed from the API/web UI.
+  - Thumbnail mode can be changed from the API/web UI.
+  - Metadata cleanup mode can be changed from the API/web UI.
+  - Default thumbnail path is `/config/default.jpg`.
+- Partial playlist warnings exist.
+  - Finished playlists with unavailable items can complete with a warning instead of failing unrelated downloaded items.
+- Navidrome-friendly metadata cleanup exists as an opt-in mode.
+  - `metadata_mode=source` remains the default.
+  - `metadata_mode=navidrome_clean` runs after successful downloads.
+  - Missing artist falls back to `Unknown Artist`.
+  - Missing title falls back to the filename stem.
+  - Missing album artist copies artist.
+  - Missing album is left blank.
+  - Metadata cleanup warnings do not fail otherwise successful jobs.
 
 ### 2.3 Current Test And Smoke Coverage
 
@@ -93,11 +114,17 @@
   - Downloader command construction.
   - Worker behavior.
   - Runtime health/config endpoints.
+  - Job API endpoints.
+  - Runtime settings.
+  - Thumbnail modes.
+  - Paginated job listing.
 - Verified Docker runtime behavior:
   - Image builds.
   - Service starts with `media-dl serve`.
   - `/api/health` responds.
   - `/api/runtime` responds.
+  - `/api/settings` responds.
+  - `/api/jobs` responds.
   - Service logs show Uvicorn startup only, not repeated polling.
   - Existing `docker compose run --rm downloader status` still works.
 
@@ -112,7 +139,7 @@
   - `run_queued_jobs`
 - Container-internal CLI uses the shared job workflow module.
   - CLI remains a parser/output layer.
-  - Future API endpoints can call the same functions.
+  - API endpoints call the same functions.
 - Structured service results exist.
   - `AddJobResult`
   - `JobActionResult`
@@ -123,59 +150,44 @@
   - `--queue-only` still stages work.
   - `--allow-duplicate` still creates explicit duplicate jobs.
 
+### 2.5 Bundled Localhost Dashboard
+
+- React/Vite dashboard exists.
+  - Built into the Docker image and served by FastAPI.
+  - Shares the same localhost Compose port as the API.
+- Dashboard supports:
+  - URL submission.
+  - Queue-only toggle.
+  - Forced duplicate toggle.
+  - Paginated job history.
+  - Retry, skip, manual run, and explicit queue import.
+  - Audio format, thumbnail mode, metadata mode, and advanced library layout settings.
+- Dashboard is operational UI, not a marketing page.
+  - Uses a darker-light theme.
+  - Keeps localhost-only service exposure.
+
+### 2.6 Shared Download Planning Interface
+
+- Shared planning models exist.
+  - `DownloadPlan`
+  - `OutputLayout`
+  - `MetadataPolicy`
+  - `PlaylistPolicy`
+- Downloader command generation uses the shared plan.
+  - YouTube and Spotify commands derive output templates from the same interface.
+  - Job completion output paths come from the same plan.
+- Future policy settings exist.
+  - `output_layout`
+  - `metadata_mode`
+  - `playlist_mode`
+- Current default layout remains source folders until metadata cleanup is reliable.
+  - Source folders are treated as legacy/provenance mode.
+  - Artist/album folders are the Navidrome target.
+  - Creator folders are the fallback where album metadata is unavailable.
+
 ## 3. Future Goals
 
-### 3.1 Localhost Job API
-
-- Add job list endpoint.
-  - `GET /api/jobs?limit=50`
-  - Returns job ID, source, URL, status, attempts, output path, and error.
-- Add job creation endpoint.
-  - `POST /api/jobs`
-  - Body includes URL, `queue_only`, and `allow_duplicate`.
-  - Processes immediately unless `queue_only` is true.
-- Add retry endpoint.
-  - `POST /api/jobs/{id}/retry`
-  - Processes immediately unless `queue_only` is true.
-- Add skip endpoint.
-  - `POST /api/jobs/{id}/skip`
-  - Accepts a reason.
-- Add manual run/import endpoint.
-  - `POST /api/run`
-  - Explicitly imports and processes queued work.
-- Add config endpoint or extend runtime endpoint.
-  - Returns music, state, queue, download paths, audio format, and service port.
-  - Must not imply polling is active.
-
-### 3.2 Localhost Web UI
-
-- Add React/Vite frontend.
-  - Depends on the localhost job API.
-  - Built into the Docker image.
-  - Served by the FastAPI service.
-- Add dashboard page.
-  - URL input.
-  - YouTube/Spotify/unsupported source detection.
-  - Queue-only toggle.
-  - Submit/download action.
-- Add job table.
-  - Shows ID, source, status, attempts, URL, output path, and last error.
-  - Supports refresh.
-  - Supports retry.
-  - Supports skip.
-- Add operational feedback.
-  - Loading state.
-  - Submitted state.
-  - Running state.
-  - Failed state with readable error.
-  - Empty state.
-- Add runtime/config panel.
-  - Shows service URL, music path, state path, queue path, download path, and audio format.
-- Keep UI localhost-only and operational.
-  - It should be a tool dashboard, not a marketing page.
-  - It should prioritize repeated use and clear job state.
-
-### 3.3 Host CLI Tool
+### 3.1 Host CLI Tool
 
 - Add repo-owned CLI wrapper executable.
   - Suggested path: `bin/media-dl`.
@@ -207,18 +219,59 @@
   - Checks configured volume paths.
   - Checks container tools: `yt-dlp`, `spotDL`, `ffmpeg`, and Deno.
 
-### 3.4 Documentation
+### 3.2 Navidrome-Friendly Metadata Follow-Ups
 
-- Update README for the no-polling architecture.
-  - Explain service/API mode.
-  - Explain that downloads are explicit actions.
-  - Explain queue files as manual import only.
-  - Explain the future web UI.
-  - Explain future host CLI install.
-- Add usage examples.
-  - Current Docker commands.
-  - Future host CLI commands.
-  - Future web UI workflow.
+- Validate `metadata_mode=navidrome_clean` with real YouTube, YouTube Music, and Spotify downloads.
+- Add any source-specific metadata extraction needed before changing defaults.
+- Keep metadata cleanup separate from command generation.
+  - Metadata cleanup runs after yt-dlp or spotDL finishes.
+  - It reuses the mutagen-based post-processing path used for default thumbnails.
+- Do not make `navidrome_clean` the default until artist/album behavior is reliable.
+
+### 3.3 Root Music Output Layout
+
+- Promote Navidrome-friendly output layout.
+  - Preferred target: `/music/<artist>/<album>/<track> - <title>.<ext>`.
+  - If album is missing, use `/music/<artist>/<title>.<ext>`.
+  - If artist/album metadata is unreliable, fall back to `/music/<creator>/<title>.<ext>`.
+  - Do not use `/music/YouTube/...` or `/music/Spotify/...` as the primary layout once metadata cleanup is reliable.
+- Preserve duplicates.
+  - Forced duplicates should still go under `/music/Duplicates/<job-id>/...`.
+- Runtime setting exists and needs full behavior support.
+  - `output_layout=source_folders`
+  - `output_layout=creator_folders`
+  - `output_layout=artist_album_folders`
+
+### 3.4 Playlist Item Expansion
+
+- Add optional playlist expansion.
+  - Extract playlist items first.
+  - Create one queued job per item.
+  - Let each item use its own creator path and metadata cleanup.
+- Track parent/child jobs.
+  - The original playlist job should be visible as the parent.
+  - Child jobs should show individual success/failure state.
+- Add a future runtime/request setting.
+  - `playlist_mode=single_job`
+  - `playlist_mode=expand_items`
+
+### 3.5 Planning Interface Follow-Ups
+
+- Continue using the completed shared planning interface as the boundary for future work.
+  - Metadata cleanup should consume `MetadataPolicy`.
+  - Output layout promotion should consume `OutputLayout`.
+  - Playlist expansion should consume `PlaylistPolicy`.
+- Keep new CLI, API, and web UI behavior routed through the same runtime settings.
+  - Avoid adding separate one-off layout or metadata decisions inside command generation.
+
+### 3.6 Documentation
+
+- Update README for:
+  - Current API/web dashboard behavior.
+  - Thumbnail modes and `/config/default.jpg`.
+  - Paginated job history.
+  - Future host CLI install.
+  - Future Navidrome metadata/output layout options.
 - Add troubleshooting notes.
   - YouTube unavailable video.
   - Missing Docker.
@@ -226,33 +279,25 @@
   - Port already in use.
   - Bad Spotify match.
   - Navidrome scan delay.
+  - Missing or invalid default thumbnail.
 
-### 3.5 Tests And Verification
+### 3.7 Tests And Verification
 
-- Add API tests for future job endpoints.
-  - Job list.
-  - Add URL.
-  - Duplicate URL behavior.
-  - Queue-only behavior.
-  - Retry.
-  - Skip.
-  - Manual run/import.
 - Add CLI wrapper tests where practical.
   - Repo root detection.
   - Docker Compose command construction.
   - API request construction.
   - Error messages when the service is down.
-- Add web UI verification.
-  - API integration.
-  - Job submission.
-  - Status refresh.
-  - Retry/skip actions.
-  - Responsive localhost dashboard layout.
+- Add future metadata/output/playlist tests.
+  - Navidrome tag normalization.
+  - Playlist parent/child job creation.
+  - Full artist/album output behavior.
+  - Creator-folder fallback behavior with real metadata gaps.
 - Keep Docker smoke test path.
   - Build service.
   - Start service.
   - Check `/api/health`.
-  - Add a known public YouTube URL through current CLI or future API.
+  - Add a known public YouTube URL through the CLI or API.
   - Confirm job completes.
   - Confirm file appears under `navidromeVolume/music`.
 
@@ -262,33 +307,38 @@
 Docker Compose service [complete]
 +-- Existing Python downloader core [complete]
 +-- Existing mounted storage model [complete]
-+-- FastAPI API runtime [partial]
++-- FastAPI API runtime [complete]
 |   +-- Health/runtime endpoints [complete]
-|   +-- Job API endpoints [future]
-|   +-- Manual queue import endpoint [future]
+|   +-- Job API endpoints [complete]
+|   +-- Manual queue import endpoint [complete]
 +-- Shared service layer [complete]
 |   +-- SQLite jobs [complete]
 |   +-- URL classification [complete]
 |   +-- yt-dlp runner [complete]
 |   +-- spotDL runner [complete]
 |   +-- API/CLI orchestration functions [complete]
-+-- React/Vite web UI [future]
-|   +-- Localhost job API [depends on future API endpoints]
++-- React/Vite web UI [complete]
+|   +-- Localhost job API [complete]
++-- Download planning interface [complete]
+|   +-- Navidrome metadata cleanup [complete, opt-in]
+|   +-- Artist/album output layout [partial, depends on metadata validation]
+|   +-- Creator-folder output layout [partial]
+|   +-- Playlist item expansion [future]
 +-- Host CLI wrapper [future]
     +-- Docker Compose lifecycle commands [can be built before job API]
-    +-- Localhost API job commands [depends on future API endpoints]
+    +-- Localhost API job commands [can use completed API endpoints]
 ```
 
 ## 5. Recommended Build Order
 
-1. Add localhost job API endpoints.
-2. Add explicit manual queue import endpoint.
-3. Add host CLI wrapper lifecycle commands.
-4. Add host CLI API-backed job commands.
-5. Add React/Vite web UI.
-6. Serve built web UI from FastAPI.
+1. Validate Navidrome metadata cleanup with real downloads.
+2. Promote artist/album output layout as the recommended default.
+3. Complete creator-folder fallback behavior for metadata gaps.
+4. Add playlist item expansion mode.
+5. Add host CLI wrapper lifecycle commands.
+6. Add host CLI API-backed job commands.
 7. Update README and troubleshooting docs.
-8. Add API, CLI, web UI, and smoke tests.
+8. Add metadata/output/playlist, CLI, and smoke tests.
 
 ## 6. Out Of Scope For V1
 

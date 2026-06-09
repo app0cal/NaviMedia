@@ -19,6 +19,7 @@ class Job:
     status: str
     attempts: int
     last_error: str | None
+    last_warning: str | None
     output_path: str | None
     dedupe_key: str
     duplicate_of: int | None
@@ -59,6 +60,8 @@ class Database:
         )
         if needs_rebuild:
             self._rebuild_jobs_table(columns)
+        elif "last_warning" not in columns:
+            self.conn.execute("ALTER TABLE jobs ADD COLUMN last_warning TEXT")
         self._create_indexes()
         self.conn.commit()
 
@@ -80,6 +83,7 @@ class Database:
                 started_at TEXT,
                 finished_at TEXT,
                 last_error TEXT,
+                last_warning TEXT,
                 output_path TEXT
             );
             """
@@ -116,6 +120,7 @@ class Database:
                 started_at TEXT,
                 finished_at TEXT,
                 last_error TEXT,
+                last_warning TEXT,
                 output_path TEXT
             );
             """
@@ -124,21 +129,23 @@ class Database:
         has_dedupe = "dedupe_key" in columns
         has_duplicate_of = "duplicate_of" in columns
         has_allow_duplicate = "allow_duplicate" in columns
+        has_last_warning = "last_warning" in columns
         dedupe_expr = "dedupe_key" if has_dedupe else "normalized_url"
         duplicate_expr = "duplicate_of" if has_duplicate_of else "NULL"
         allow_expr = "allow_duplicate" if has_allow_duplicate else "0"
+        warning_expr = "last_warning" if has_last_warning else "NULL"
 
         self.conn.execute(
             f"""
             INSERT INTO jobs_new (
                 id, source, raw_url, normalized_url, dedupe_key, duplicate_of,
                 allow_duplicate, status, attempts, first_seen, last_seen,
-                started_at, finished_at, last_error, output_path
+                started_at, finished_at, last_error, last_warning, output_path
             )
             SELECT
                 id, source, raw_url, normalized_url, {dedupe_expr}, {duplicate_expr},
                 {allow_expr}, status, attempts, first_seen, last_seen,
-                started_at, finished_at, last_error, output_path
+                started_at, finished_at, last_error, {warning_expr}, output_path
             FROM jobs
             """
         )
@@ -236,18 +243,40 @@ class Database:
         ).fetchone()
         return row["id"] if row else None
 
-    def list_jobs(self, statuses: Iterable[str] | None = None, limit: int = 50) -> list[Job]:
+    def count_jobs(self, statuses: Iterable[str] | None = None) -> int:
+        if statuses:
+            status_list = list(statuses)
+            placeholders = ",".join("?" for _ in status_list)
+            row = self.conn.execute(
+                f"SELECT COUNT(*) AS total FROM jobs WHERE status IN ({placeholders})",
+                tuple(status_list),
+            ).fetchone()
+        else:
+            row = self.conn.execute("SELECT COUNT(*) AS total FROM jobs").fetchone()
+        return int(row["total"])
+
+    def list_jobs(
+        self,
+        statuses: Iterable[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Job]:
         if statuses:
             status_list = list(statuses)
             placeholders = ",".join("?" for _ in status_list)
             rows = self.conn.execute(
-                f"SELECT * FROM jobs WHERE status IN ({placeholders}) ORDER BY id DESC LIMIT ?",
-                (*status_list, limit),
+                f"""
+                SELECT * FROM jobs
+                WHERE status IN ({placeholders})
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*status_list, limit, offset),
             ).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT * FROM jobs ORDER BY id DESC LIMIT ?",
-                (limit,),
+                "SELECT * FROM jobs ORDER BY id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
             ).fetchall()
         return [_row_to_job(row) for row in rows]
 
@@ -269,24 +298,26 @@ class Database:
             SET status = 'running',
                 attempts = attempts + 1,
                 started_at = ?,
-                last_error = NULL
+                last_error = NULL,
+                last_warning = NULL
             WHERE id = ?
             """,
             (_now(), job_id),
         )
         self.conn.commit()
 
-    def mark_complete(self, job_id: int, output_path: str) -> None:
+    def mark_complete(self, job_id: int, output_path: str, warning: str | None = None) -> None:
         self.conn.execute(
             """
             UPDATE jobs
             SET status = 'complete',
                 finished_at = ?,
                 output_path = ?,
-                last_error = NULL
+                last_error = NULL,
+                last_warning = ?
             WHERE id = ?
             """,
-            (_now(), output_path, job_id),
+            (_now(), output_path, warning[-4000:] if warning else None, job_id),
         )
         self.conn.commit()
 
@@ -296,7 +327,8 @@ class Database:
             UPDATE jobs
             SET status = 'failed',
                 finished_at = ?,
-                last_error = ?
+                last_error = ?,
+                last_warning = NULL
             WHERE id = ?
             """,
             (_now(), error[-4000:], job_id),
@@ -305,7 +337,7 @@ class Database:
 
     def retry(self, job_id: int) -> Job:
         self.conn.execute(
-            "UPDATE jobs SET status = 'retry', last_error = NULL WHERE id = ?",
+            "UPDATE jobs SET status = 'retry', last_error = NULL, last_warning = NULL WHERE id = ?",
             (job_id,),
         )
         self.conn.commit()
@@ -317,7 +349,8 @@ class Database:
             UPDATE jobs
             SET status = 'skipped',
                 finished_at = ?,
-                last_error = ?
+                last_error = ?,
+                last_warning = NULL
             WHERE id = ?
             """,
             (_now(), reason, job_id),
@@ -335,6 +368,7 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         status=row["status"],
         attempts=row["attempts"],
         last_error=row["last_error"],
+        last_warning=row["last_warning"],
         output_path=row["output_path"],
         dedupe_key=row["dedupe_key"],
         duplicate_of=row["duplicate_of"],

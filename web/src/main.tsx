@@ -22,6 +22,12 @@ type SettingsResponse = {
   audio_formats: string[];
   thumbnail_mode: string;
   thumbnail_modes: string[];
+  output_layout: string;
+  output_layouts: string[];
+  metadata_mode: string;
+  metadata_modes: string[];
+  playlist_mode: string;
+  playlist_modes: string[];
   default_thumbnail_path: string;
 };
 
@@ -114,12 +120,15 @@ function App() {
         body: JSON.stringify({
           audio_format: settings.audio_format,
           thumbnail_mode: settings.thumbnail_mode,
+          output_layout: settings.output_layout,
+          metadata_mode: settings.metadata_mode,
+          playlist_mode: settings.playlist_mode,
         }),
       });
       setSettings(result);
       setNotice({
         kind: "success",
-        text: `Settings saved: ${result.audio_format}, thumbnails ${thumbnailLabel(result.thumbnail_mode)}.`,
+        text: `Settings saved: ${result.audio_format}, ${layoutLabel(result.output_layout)}.`,
       });
     } catch (error) {
       setNotice({ kind: "error", text: messageFor(error) });
@@ -342,8 +351,46 @@ function App() {
                 </option>
               ))}
             </select>
+            <label className="field-label stacked-field" htmlFor="output-layout">
+              Library layout
+            </label>
+            <select
+              id="output-layout"
+              value={settings?.output_layout ?? ""}
+              onChange={(event) =>
+                setSettings((current) =>
+                  current ? { ...current, output_layout: event.target.value } : current,
+                )
+              }
+              disabled={loadingSettings || savingSettings || !settings}
+            >
+              {(settings?.output_layouts ?? []).map((layout) => (
+                <option key={layout} value={layout}>
+                  {layoutLabel(layout)}
+                </option>
+              ))}
+            </select>
+            <label className="field-label stacked-field" htmlFor="metadata-mode">
+              Metadata
+            </label>
+            <select
+              id="metadata-mode"
+              value={settings?.metadata_mode ?? ""}
+              onChange={(event) =>
+                setSettings((current) =>
+                  current ? { ...current, metadata_mode: event.target.value } : current,
+                )
+              }
+              disabled={loadingSettings || savingSettings || !settings}
+            >
+              {(settings?.metadata_modes ?? []).map((mode) => (
+                <option key={mode} value={mode}>
+                  {metadataLabel(mode)}
+                </option>
+              ))}
+            </select>
             <p className="helper-text">
-              Formats: {settings?.audio_formats.join(", ") ?? "loading..."}. Default art path:{" "}
+              Advanced: source folders are available for legacy/provenance organization. Default art path:{" "}
               {settings?.default_thumbnail_path ?? "loading..."}.
             </p>
           </form>
@@ -411,6 +458,19 @@ function thumbnailLabel(mode: string) {
   if (mode === "source") return "Use source thumbnails";
   if (mode === "default") return "Use default image";
   if (mode === "none") return "No thumbnails";
+  return mode;
+}
+
+function layoutLabel(layout: string) {
+  if (layout === "artist_album_folders") return "Navidrome organized";
+  if (layout === "creator_folders") return "Creator folders";
+  if (layout === "source_folders") return "Source folders / legacy";
+  return layout;
+}
+
+function metadataLabel(mode: string) {
+  if (mode === "source") return "Source metadata";
+  if (mode === "navidrome_clean") return "Navidrome clean";
   return mode;
 }
 

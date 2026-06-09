@@ -14,6 +14,11 @@ from pydantic import BaseModel, Field
 from media_dl import __version__
 from media_dl.config import Config, load_config
 from media_dl.db import Job
+from media_dl.download_plan import (
+    ALLOWED_METADATA_MODES,
+    ALLOWED_OUTPUT_LAYOUTS,
+    ALLOWED_PLAYLIST_MODES,
+)
 from media_dl.jobs import (
     UnsupportedUrlError,
     add_url,
@@ -25,6 +30,7 @@ from media_dl.jobs import (
 )
 from media_dl.runtime_settings import (
     ALLOWED_AUDIO_FORMATS,
+    ALLOWED_THUMBNAIL_MODES,
     load_runtime_settings,
     save_runtime_settings,
 )
@@ -41,6 +47,7 @@ class JobResponse(BaseModel):
     status: str
     attempts: int
     last_error: str | None
+    last_warning: str | None
     output_path: str | None
     dedupe_key: str
     duplicate_of: int | None
@@ -78,6 +85,10 @@ class JobActionResponse(BaseModel):
 
 class JobListResponse(BaseModel):
     jobs: list[JobResponse]
+    limit: int
+    offset: int
+    total: int
+    has_more: bool
 
 
 class RunJobsResponse(BaseModel):
@@ -100,10 +111,23 @@ class ImportQueueResponse(BaseModel):
 class RuntimeSettingsResponse(BaseModel):
     audio_format: str
     audio_formats: list[str]
+    thumbnail_mode: str
+    thumbnail_modes: list[str]
+    output_layout: str
+    output_layouts: list[str]
+    metadata_mode: str
+    metadata_modes: list[str]
+    playlist_mode: str
+    playlist_modes: list[str]
+    default_thumbnail_path: str
 
 
 class UpdateRuntimeSettingsRequest(BaseModel):
     audio_format: str
+    thumbnail_mode: str = "source"
+    output_layout: str | None = None
+    metadata_mode: str | None = None
+    playlist_mode: str | None = None
 
 
 def create_app(config: Config | None = None) -> FastAPI:
@@ -122,12 +146,19 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/api/runtime")
     def runtime() -> dict[str, Any]:
+        current = load_runtime_settings(cfg)
         return {
             "music_root": str(cfg.music_root),
             "state_dir": str(cfg.state_dir),
             "queue_dir": str(cfg.queue_dir),
             "download_dir": str(cfg.download_dir),
-            "audio_format": load_runtime_settings(cfg).audio_format,
+            "config_dir": str(cfg.resolved_config_dir),
+            "default_thumbnail_path": str(cfg.resolved_default_thumbnail_path),
+            "audio_format": current.audio_format,
+            "thumbnail_mode": current.thumbnail_mode,
+            "output_layout": current.output_layout,
+            "metadata_mode": current.metadata_mode,
+            "playlist_mode": current.playlist_mode,
             "service_port": cfg.service_port,
         }
 
@@ -137,23 +168,57 @@ def create_app(config: Config | None = None) -> FastAPI:
         return RuntimeSettingsResponse(
             audio_format=current.audio_format,
             audio_formats=list(ALLOWED_AUDIO_FORMATS),
+            thumbnail_mode=current.thumbnail_mode,
+            thumbnail_modes=list(ALLOWED_THUMBNAIL_MODES),
+            output_layout=current.output_layout,
+            output_layouts=list(ALLOWED_OUTPUT_LAYOUTS),
+            metadata_mode=current.metadata_mode,
+            metadata_modes=list(ALLOWED_METADATA_MODES),
+            playlist_mode=current.playlist_mode,
+            playlist_modes=list(ALLOWED_PLAYLIST_MODES),
+            default_thumbnail_path=str(cfg.resolved_default_thumbnail_path),
         )
 
     @app.put("/api/settings", response_model=RuntimeSettingsResponse)
     def update_settings(request: UpdateRuntimeSettingsRequest) -> RuntimeSettingsResponse:
+        existing = load_runtime_settings(cfg)
         try:
-            current = save_runtime_settings(cfg, request.audio_format)
+            current = save_runtime_settings(
+                cfg,
+                request.audio_format,
+                thumbnail_mode=request.thumbnail_mode,
+                output_layout=request.output_layout or existing.output_layout,
+                metadata_mode=request.metadata_mode or existing.metadata_mode,
+                playlist_mode=request.playlist_mode or existing.playlist_mode,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RuntimeSettingsResponse(
             audio_format=current.audio_format,
             audio_formats=list(ALLOWED_AUDIO_FORMATS),
+            thumbnail_mode=current.thumbnail_mode,
+            thumbnail_modes=list(ALLOWED_THUMBNAIL_MODES),
+            output_layout=current.output_layout,
+            output_layouts=list(ALLOWED_OUTPUT_LAYOUTS),
+            metadata_mode=current.metadata_mode,
+            metadata_modes=list(ALLOWED_METADATA_MODES),
+            playlist_mode=current.playlist_mode,
+            playlist_modes=list(ALLOWED_PLAYLIST_MODES),
+            default_thumbnail_path=str(cfg.resolved_default_thumbnail_path),
         )
 
     @app.get("/api/jobs", response_model=JobListResponse)
-    def jobs(limit: int = Query(default=50, ge=1, le=500)) -> JobListResponse:
+    def jobs(
+        limit: int = Query(default=25, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ) -> JobListResponse:
+        result = list_recent_jobs(cfg, limit=limit, offset=offset)
         return JobListResponse(
-            jobs=[_job_response(job) for job in list_recent_jobs(cfg, limit=limit)]
+            jobs=[_job_response(job) for job in result.jobs],
+            limit=result.limit,
+            offset=result.offset,
+            total=result.total,
+            has_more=result.has_more,
         )
 
     @app.post("/api/jobs", response_model=AddJobResponse)
@@ -244,6 +309,7 @@ def _job_response(job: Job) -> JobResponse:
         status=job.status,
         attempts=job.attempts,
         last_error=job.last_error,
+        last_warning=job.last_warning,
         output_path=job.output_path,
         dedupe_key=job.dedupe_key,
         duplicate_of=job.duplicate_of,

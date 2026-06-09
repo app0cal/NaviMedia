@@ -49,6 +49,7 @@ docker compose up -d --build
 ```
 
 Navidrome should mount the same host folder read-only or read-write as its music library.
+The downloader also mounts `${NAVIMEDIA_CONFIG:-./config}` at `/config`; place an editable `default.jpg` there for the configured default thumbnail path.
 
 ## Queue Files
 

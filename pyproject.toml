@@ -5,6 +5,7 @@ description = "Queue-based YouTube and Spotify downloader for a Navidrome music 
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.103,<0.104",
+  "mutagen>=1.47,<2",
   "uvicorn[standard]>=0.23.2,<0.24",
 ]
 
