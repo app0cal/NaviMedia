@@ -10,6 +10,7 @@ type Job = {
   status: string;
   attempts: number;
   last_error: string | null;
+  last_warning: string | null;
   output_path: string | null;
   dedupe_key: string;
   duplicate_of: number | null;
@@ -19,13 +20,23 @@ type Job = {
 type SettingsResponse = {
   audio_format: string;
   audio_formats: string[];
+  thumbnail_mode: string;
+  thumbnail_modes: string[];
+  default_thumbnail_path: string;
 };
 
-type JobsResponse = { jobs: Job[] };
+type JobsResponse = {
+  jobs: Job[];
+  limit: number;
+  offset: number;
+  total: number;
+  has_more: boolean;
+};
 type RunResponse = { processed: number };
 type ImportResponse = { imported: number; duplicates: number; errors: number };
 
 type Notice = { kind: "success" | "error" | "info"; text: string } | null;
+const JOB_PAGE_SIZE = 25;
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -51,12 +62,20 @@ function App() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
+  const [jobOffset, setJobOffset] = useState(0);
+  const [jobTotal, setJobTotal] = useState(0);
+  const [hasMoreJobs, setHasMoreJobs] = useState(false);
+  const jobStart = jobs.length === 0 ? 0 : jobOffset + 1;
+  const jobEnd = Math.min(jobOffset + jobs.length, jobTotal);
 
-  async function loadJobs() {
+  async function loadJobs(offset = jobOffset) {
     setLoadingJobs(true);
     try {
-      const data = await api<JobsResponse>("/api/jobs?limit=50");
+      const data = await api<JobsResponse>(`/api/jobs?limit=${JOB_PAGE_SIZE}&offset=${offset}`);
       setJobs(data.jobs);
+      setJobOffset(data.offset);
+      setJobTotal(data.total);
+      setHasMoreJobs(data.has_more);
     } finally {
       setLoadingJobs(false);
     }
@@ -92,10 +111,16 @@ function App() {
     try {
       const result = await api<SettingsResponse>("/api/settings", {
         method: "PUT",
-        body: JSON.stringify({ audio_format: settings.audio_format }),
+        body: JSON.stringify({
+          audio_format: settings.audio_format,
+          thumbnail_mode: settings.thumbnail_mode,
+        }),
       });
       setSettings(result);
-      setNotice({ kind: "success", text: `Audio format saved as ${result.audio_format}.` });
+      setNotice({
+        kind: "success",
+        text: `Settings saved: ${result.audio_format}, thumbnails ${thumbnailLabel(result.thumbnail_mode)}.`,
+      });
     } catch (error) {
       setNotice({ kind: "error", text: messageFor(error) });
     } finally {
@@ -129,7 +154,7 @@ function App() {
         kind: "success",
         text: result.created ? `Job created.${processedText}` : "URL already exists; existing job was refreshed.",
       });
-      await loadJobs();
+      await loadJobs(0);
     } catch (error) {
       setNotice({ kind: "error", text: messageFor(error) });
     } finally {
@@ -163,11 +188,20 @@ function App() {
         kind: "success",
         text: `Imported ${result.imported}; duplicates ${result.duplicates}; errors ${result.errors}.`,
       });
-      await loadJobs();
+      await loadJobs(0);
     } catch (error) {
       setNotice({ kind: "error", text: messageFor(error) });
     } finally {
       setBusyAction(null);
+    }
+  }
+
+  async function goToJobsPage(offset: number) {
+    setNotice(null);
+    try {
+      await loadJobs(offset);
+    } catch (error) {
+      setNotice({ kind: "error", text: messageFor(error) });
     }
   }
 
@@ -260,13 +294,13 @@ function App() {
           <div className="panel-heading">
             <div>
               <h2>Audio Format</h2>
-              <p>Choose the format future downloads will use.</p>
+              <p>Choose how future downloads handle audio and cover art.</p>
             </div>
             <span className="source-hint">Persisted</span>
           </div>
           <form className="format-form" onSubmit={saveSettings}>
             <label className="field-label" htmlFor="audio-format">
-              Format
+              Audio format
             </label>
             <div className="submit-row">
               <select
@@ -289,8 +323,28 @@ function App() {
                 {savingSettings ? "Saving" : "Save"}
               </button>
             </div>
+            <label className="field-label stacked-field" htmlFor="thumbnail-mode">
+              Thumbnails
+            </label>
+            <select
+              id="thumbnail-mode"
+              value={settings?.thumbnail_mode ?? ""}
+              onChange={(event) =>
+                setSettings((current) =>
+                  current ? { ...current, thumbnail_mode: event.target.value } : current,
+                )
+              }
+              disabled={loadingSettings || savingSettings || !settings}
+            >
+              {(settings?.thumbnail_modes ?? []).map((mode) => (
+                <option key={mode} value={mode}>
+                  {thumbnailLabel(mode)}
+                </option>
+              ))}
+            </select>
             <p className="helper-text">
-              Allowed formats: {settings?.audio_formats.join(", ") ?? "loading..."}.
+              Formats: {settings?.audio_formats.join(", ") ?? "loading..."}. Default art path:{" "}
+              {settings?.default_thumbnail_path ?? "loading..."}.
             </p>
           </form>
         </section>
@@ -300,7 +354,11 @@ function App() {
         <div className="jobs-toolbar">
           <div>
             <h2>Jobs</h2>
-            <p>{loadingJobs ? "Loading jobs..." : `${jobs.length} recent job(s)`}</p>
+            <p>
+              {loadingJobs
+                ? "Loading jobs..."
+                : `${jobTotal} total job(s), showing ${jobStart}-${jobEnd}`}
+            </p>
           </div>
           <div className="job-actions">
             <button className="button secondary" onClick={runQueued} disabled={Boolean(busyAction)}>
@@ -319,6 +377,25 @@ function App() {
           onRetry={retryJob}
           onSkip={skipJob}
         />
+        <div className="pagination-row">
+          <button
+            className="button secondary"
+            onClick={() => goToJobsPage(Math.max(0, jobOffset - JOB_PAGE_SIZE))}
+            disabled={loadingJobs || jobOffset === 0}
+          >
+            Previous
+          </button>
+          <span>
+            Page {Math.floor(jobOffset / JOB_PAGE_SIZE) + 1} of {Math.max(1, Math.ceil(jobTotal / JOB_PAGE_SIZE))}
+          </span>
+          <button
+            className="button secondary"
+            onClick={() => goToJobsPage(jobOffset + JOB_PAGE_SIZE)}
+            disabled={loadingJobs || !hasMoreJobs}
+          >
+            Next
+          </button>
+        </div>
       </section>
     </main>
   );
@@ -328,6 +405,13 @@ function SourceHint({ url }: { url: string }) {
   const value = url.toLowerCase();
   const label = value.includes("spotify") ? "Spotify" : value.includes("youtu") ? "YouTube" : "Unknown";
   return <span className={`source-hint ${label.toLowerCase()}`}>{label}</span>;
+}
+
+function thumbnailLabel(mode: string) {
+  if (mode === "source") return "Use source thumbnails";
+  if (mode === "default") return "Use default image";
+  if (mode === "none") return "No thumbnails";
+  return mode;
 }
 
 function Toggle({
@@ -378,6 +462,7 @@ function JobTable({
             <th>Attempts</th>
             <th>URL</th>
             <th>Output</th>
+            <th>Warning</th>
             <th>Error</th>
             <th>Actions</th>
           </tr>
@@ -396,6 +481,7 @@ function JobTable({
                 {job.allow_duplicate && <span className="duplicate-marker">duplicate</span>}
               </td>
               <td className="muted-cell">{job.output_path ?? "—"}</td>
+              <td className="warning-cell">{job.last_warning ?? "—"}</td>
               <td className="error-cell">{job.last_error ?? "—"}</td>
               <td>
                 <div className="row-actions">
