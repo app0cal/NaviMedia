@@ -1,3 +1,5 @@
+"""Build and run yt-dlp/spotDL commands, then apply local post-processing."""
+
 from __future__ import annotations
 
 import base64
@@ -30,12 +32,16 @@ IMAGE_MIME_BY_SUFFIX = {
 
 @dataclass(frozen=True)
 class DownloadResult:
+    """Return the output root and any non-fatal warning from a completed download."""
+
     output_path: Path
     warning: str | None = None
 
 
 @dataclass(frozen=True)
 class _ConfigSettings:
+    """Adapt static Config defaults to the runtime settings protocol."""
+
     audio_format: str
     thumbnail_mode: str
     output_layout: str = DEFAULT_OUTPUT_LAYOUT
@@ -44,7 +50,10 @@ class _ConfigSettings:
 
 
 class Downloader:
+    """Coordinate command generation, execution, artwork, and metadata cleanup."""
+
     def __init__(self, config: Config, settings: DownloadSettings | None = None):
+        """Store config and runtime settings for future commands."""
         self.config = config
         self.settings = settings or _ConfigSettings(
             audio_format=config.audio_format,
@@ -52,9 +61,11 @@ class Downloader:
         )
 
     def command_for(self, job: Job) -> list[str]:
+        """Build a downloader command directly from a job."""
         return self.command_for_plan(plan_download(self.config, job, self.settings))
 
     def command_for_plan(self, plan: DownloadPlan) -> list[str]:
+        """Dispatch a download plan to the source-specific command builder."""
         if plan.source == Source.YOUTUBE:
             return self.youtube_command_for_plan(plan)
         if plan.source == Source.SPOTIFY:
@@ -62,6 +73,7 @@ class Downloader:
         raise ValueError(f"unsupported source: {plan.source}")
 
     def run(self, job: Job) -> DownloadResult:
+        """Run the configured downloader and post-process newly created audio files."""
         plan = plan_download(self.config, job, self.settings)
         command = self.command_for_plan(plan)
         started_at = time.time()
@@ -99,6 +111,7 @@ class Downloader:
         )
 
     def youtube_command(self, url: str, duplicate_job_id: int | None = None) -> list[str]:
+        """Build an ad-hoc YouTube command for tests and CLI-style callers."""
         plan = self._ad_hoc_plan(
             source=Source.YOUTUBE,
             url=url,
@@ -107,6 +120,7 @@ class Downloader:
         return self.youtube_command_for_plan(plan)
 
     def youtube_command_for_plan(self, plan: DownloadPlan) -> list[str]:
+        """Build the yt-dlp command for a YouTube download plan."""
         command = [
             self.config.yt_dlp_bin,
             "--ignore-errors",
@@ -139,6 +153,7 @@ class Downloader:
         return command
 
     def spotify_command(self, url: str, duplicate_job_id: int | None = None) -> list[str]:
+        """Build an ad-hoc Spotify command for tests and CLI-style callers."""
         plan = self._ad_hoc_plan(
             source=Source.SPOTIFY,
             url=url,
@@ -147,6 +162,7 @@ class Downloader:
         return self.spotify_command_for_plan(plan)
 
     def spotify_command_for_plan(self, plan: DownloadPlan) -> list[str]:
+        """Build the spotDL command for a Spotify download plan."""
         command = [
             self.config.spotdl_bin,
             "download",
@@ -163,6 +179,7 @@ class Downloader:
         return command
 
     def output_root_for(self, source: Source, duplicate_job_id: int | None = None) -> Path:
+        """Return the output root that would be used for a source and duplicate state."""
         return self._ad_hoc_plan(
             source=source,
             url="",
@@ -170,6 +187,7 @@ class Downloader:
         ).output_layout.output_root
 
     def _apply_default_thumbnail(self, paths: list[Path], thumbnail_mode: str) -> str | None:
+        """Embed configured default artwork into new files when requested."""
         if thumbnail_mode != "default":
             return None
         thumbnail_path = self.config.resolved_default_thumbnail_path
@@ -202,6 +220,7 @@ class Downloader:
         url: str,
         duplicate_job_id: int | None,
     ) -> DownloadPlan:
+        """Create a temporary job to reuse the normal planning path."""
         job = Job(
             id=duplicate_job_id or 0,
             source=source,
@@ -220,6 +239,7 @@ class Downloader:
 
 
 def _warning_from_output(output: str) -> str | None:
+    """Extract a playlist warning from downloader output that contains errors."""
     errors = [line.strip() for line in output.splitlines() if line.strip().startswith("ERROR:")]
     if not errors:
         return None
@@ -229,6 +249,7 @@ def _warning_from_output(output: str) -> str | None:
 
 
 def _finished_playlist(output: str) -> bool:
+    """Return whether yt-dlp reported that playlist processing finished."""
     return any(
         line.strip().startswith("[download] Finished downloading playlist:")
         for line in output.splitlines()
@@ -236,6 +257,7 @@ def _finished_playlist(output: str) -> bool:
 
 
 def _combine_warnings(*warnings: str | None) -> str | None:
+    """Join non-empty warning strings into a single job warning."""
     present = [warning for warning in warnings if warning]
     if not present:
         return None
@@ -243,6 +265,7 @@ def _combine_warnings(*warnings: str | None) -> str | None:
 
 
 def _new_audio_files(output_root: Path, started_at: float) -> list[Path]:
+    """Find audio files under the output root that were modified by this run."""
     if not output_root.exists():
         return []
     files: list[Path] = []
@@ -259,6 +282,7 @@ def _new_audio_files(output_root: Path, started_at: float) -> list[Path]:
 
 
 def _embed_thumbnail(path: Path, image_bytes: bytes, mime: str) -> None:
+    """Embed cover art into supported audio containers using mutagen."""
     suffix = path.suffix.lower()
     if suffix == ".mp3":
         from mutagen.id3 import APIC
@@ -312,6 +336,7 @@ def _embed_thumbnail(path: Path, image_bytes: bytes, mime: str) -> None:
 
 
 def _picture(image_bytes: bytes, mime: str):
+    """Build a FLAC-style picture block for formats that share that representation."""
     from mutagen.flac import Picture
 
     picture = Picture()

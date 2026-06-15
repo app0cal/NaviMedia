@@ -1,3 +1,5 @@
+"""Import simple text queue files into the shared job database."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,12 +12,14 @@ QUEUE_FILES = ("inbox.txt", "youtube.txt", "spotify.txt")
 
 
 def ensure_queue_files(queue_dir: Path) -> None:
+    """Create the queue directory and standard queue files if needed."""
     queue_dir.mkdir(parents=True, exist_ok=True)
     for name in QUEUE_FILES:
         (queue_dir / name).touch(exist_ok=True)
 
 
 def import_queue(queue_dir: Path, db: Database) -> list[tuple[Job | None, bool, str | None]]:
+    """Read all queue files and add supported URLs as jobs."""
     ensure_queue_files(queue_dir)
     results: list[tuple[Job | None, bool, str | None]] = []
 
@@ -37,6 +41,7 @@ def import_queue(queue_dir: Path, db: Database) -> list[tuple[Job | None, bool, 
 
 
 def _read_lines(path: Path) -> list[str]:
+    """Return non-empty, non-comment lines from a queue file."""
     if not path.exists():
         return []
     urls: list[str] = []

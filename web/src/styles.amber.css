@@ -1,0 +1,68 @@
+/* Amber theme. Rename this file to styles.css to make it active. */
+
+@import "./styles.base.css";
+
+:root {
+  --page-bg: #eee3ce;
+  --body-bg: linear-gradient(180deg, #e6d5b8 0%, #f3eadb 46%, #eee3ce 100%);
+  --sidebar-bg: #fffaf1;
+  --panel-bg: #fffaf1;
+  --heading: #24180c;
+  --text: #2d2114;
+  --muted: #6f5a43;
+  --label: #4b3825;
+  --brand: #2f1b0a;
+  --border: #d5bf9d;
+  --shadow: 0 10px 28px rgb(87 52 18 / 0.13);
+  --accent: #c05621;
+  --accent-hover: #9a3412;
+  --accent-strong: #9a3412;
+  --accent-soft: #ffedd5;
+  --accent-soft-border: #fed7aa;
+  --focus-ring: rgb(192 86 33 / 0.16);
+  --input-bg: #f8efe2;
+  --input-border: #c9ad84;
+  --button-bg: #f9f0e4;
+  --button-bg-hover: #f1dfc7;
+  --button-border: #c9ad84;
+  --button-border-hover: #a17f52;
+  --button-text: #3f2d1a;
+  --primary-text: #ffffff;
+  --switch-bg: #d7c19d;
+  --switch-knob: #ffffff;
+  --hint-bg: #f6e7d0;
+  --hint-text: #4b3825;
+  --info-button-bg: #fff3df;
+  --info-button-border: #e8c694;
+  --info-button-text: #9a3412;
+  --tooltip-bg: #24180c;
+  --tooltip-border: #3f2d1a;
+  --tooltip-text: #fffaf1;
+  --tooltip-shadow: 0 14px 30px rgb(87 52 18 / 0.25);
+  --table-head-bg: #f2e4cf;
+  --table-heading: #6f5a43;
+  --table-border: #f1e4d2;
+  --empty-bg: #f8efe2;
+  --empty-border: #ba9870;
+  --status-bg: #eee0cb;
+  --status-text: #6f5a43;
+  --queued-bg: #fef3c7;
+  --queued-text: #92400e;
+  --success-bg: #dcfce7;
+  --success-border: #86efac;
+  --success-text: #166534;
+  --danger-bg: #fff1f2;
+  --danger-hover: #ffe4e6;
+  --danger-border: #fecaca;
+  --danger-text: #991b1b;
+  --danger-link: #dc2626;
+  --warning-text: #92400e;
+  --info-bg: #dbeafe;
+  --info-border: #93c5fd;
+  --info-text: #1d4ed8;
+  --link: #c05621;
+  --youtube-bg: #fee2e2;
+  --youtube-text: #991b1b;
+  --spotify-bg: #dcfce7;
+  --spotify-text: #166534;
+}

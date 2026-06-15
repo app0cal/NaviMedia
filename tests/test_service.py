@@ -1,11 +1,16 @@
+"""Tests for FastAPI routes, dashboard serving, settings, and job actions."""
+
 from fastapi.testclient import TestClient
 
 from media_dl.config import Config
+from media_dl.db import Database
 import media_dl.service as service
 from media_dl.service import create_app
+from media_dl.urltools import Source
 
 
 def config(tmp_path):
+    """Build a test config rooted in a temporary directory."""
     return Config(
         music_root=tmp_path / "music",
         state_dir=tmp_path / "state",
@@ -18,6 +23,7 @@ def config(tmp_path):
 
 
 def test_health_endpoint(tmp_path):
+    """Verify the health endpoint returns service status."""
     client = TestClient(create_app(config(tmp_path)))
 
     response = client.get("/api/health")
@@ -27,6 +33,7 @@ def test_health_endpoint(tmp_path):
 
 
 def test_runtime_endpoint(tmp_path):
+    """Verify runtime endpoint exposes resolved paths and settings."""
     cfg = config(tmp_path)
     client = TestClient(create_app(cfg))
 
@@ -44,12 +51,13 @@ def test_runtime_endpoint(tmp_path):
     assert data["service_port"] == 8765
     assert data["audio_format"] == "m4a"
     assert data["thumbnail_mode"] == "source"
-    assert data["output_layout"] == "source_folders"
-    assert data["metadata_mode"] == "source"
+    assert data["output_layout"] == "artist_album_folders"
+    assert data["metadata_mode"] == "navidrome_clean"
     assert data["playlist_mode"] == "single_job"
 
 
 def test_settings_endpoint_defaults_and_lists_allowed_formats(tmp_path):
+    """Verify settings endpoint returns defaults and allowed option lists."""
     client = TestClient(create_app(config(tmp_path)))
 
     response = client.get("/api/settings")
@@ -60,9 +68,9 @@ def test_settings_endpoint_defaults_and_lists_allowed_formats(tmp_path):
         "audio_formats": ["m4a", "mp3", "flac", "opus", "wav"],
         "thumbnail_mode": "source",
         "thumbnail_modes": ["source", "default", "none"],
-        "output_layout": "source_folders",
+        "output_layout": "artist_album_folders",
         "output_layouts": ["source_folders", "creator_folders", "artist_album_folders"],
-        "metadata_mode": "source",
+        "metadata_mode": "navidrome_clean",
         "metadata_modes": ["source", "navidrome_clean"],
         "playlist_mode": "single_job",
         "playlist_modes": ["single_job", "expand_items"],
@@ -71,6 +79,7 @@ def test_settings_endpoint_defaults_and_lists_allowed_formats(tmp_path):
 
 
 def test_settings_endpoint_persists_audio_format(tmp_path):
+    """Verify audio and thumbnail setting updates persist."""
     cfg = config(tmp_path)
     client = TestClient(create_app(cfg))
 
@@ -85,9 +94,9 @@ def test_settings_endpoint_persists_audio_format(tmp_path):
         "audio_formats": ["m4a", "mp3", "flac", "opus", "wav"],
         "thumbnail_mode": "default",
         "thumbnail_modes": ["source", "default", "none"],
-        "output_layout": "source_folders",
+        "output_layout": "artist_album_folders",
         "output_layouts": ["source_folders", "creator_folders", "artist_album_folders"],
-        "metadata_mode": "source",
+        "metadata_mode": "navidrome_clean",
         "metadata_modes": ["source", "navidrome_clean"],
         "playlist_mode": "single_job",
         "playlist_modes": ["single_job", "expand_items"],
@@ -101,6 +110,7 @@ def test_settings_endpoint_persists_audio_format(tmp_path):
 
 
 def test_settings_endpoint_persists_download_policy_fields(tmp_path):
+    """Verify layout, metadata, and playlist policy settings persist."""
     cfg = config(tmp_path)
     client = TestClient(create_app(cfg))
 
@@ -127,6 +137,7 @@ def test_settings_endpoint_persists_download_policy_fields(tmp_path):
 
 
 def test_settings_endpoint_rejects_unsupported_audio_format(tmp_path):
+    """Verify invalid audio formats are rejected."""
     client = TestClient(create_app(config(tmp_path)))
 
     response = client.put("/api/settings", json={"audio_format": "aac"})
@@ -136,6 +147,7 @@ def test_settings_endpoint_rejects_unsupported_audio_format(tmp_path):
 
 
 def test_settings_endpoint_rejects_unsupported_thumbnail_mode(tmp_path):
+    """Verify invalid thumbnail modes are rejected."""
     client = TestClient(create_app(config(tmp_path)))
 
     response = client.put(
@@ -148,6 +160,7 @@ def test_settings_endpoint_rejects_unsupported_thumbnail_mode(tmp_path):
 
 
 def test_settings_endpoint_rejects_unsupported_output_layout(tmp_path):
+    """Verify invalid output layouts are rejected."""
     client = TestClient(create_app(config(tmp_path)))
 
     response = client.put(
@@ -160,6 +173,7 @@ def test_settings_endpoint_rejects_unsupported_output_layout(tmp_path):
 
 
 def test_settings_endpoint_rejects_unsupported_metadata_mode(tmp_path):
+    """Verify invalid metadata modes are rejected."""
     client = TestClient(create_app(config(tmp_path)))
 
     response = client.put(
@@ -176,6 +190,7 @@ def test_settings_endpoint_rejects_unsupported_metadata_mode(tmp_path):
 
 
 def test_web_index_served_when_built(tmp_path, monkeypatch):
+    """Verify the built dashboard index is served at root."""
     web_dir = tmp_path / "web-dist"
     web_dir.mkdir()
     (web_dir / "index.html").write_text("<html><body>dashboard</body></html>", encoding="utf-8")
@@ -190,6 +205,7 @@ def test_web_index_served_when_built(tmp_path, monkeypatch):
 
 
 def test_web_fallback_serves_dashboard_for_non_api_paths(tmp_path, monkeypatch):
+    """Verify non-API routes fall back to the dashboard."""
     web_dir = tmp_path / "web-dist"
     web_dir.mkdir()
     (web_dir / "index.html").write_text("<html><body>dashboard</body></html>", encoding="utf-8")
@@ -203,6 +219,7 @@ def test_web_fallback_serves_dashboard_for_non_api_paths(tmp_path, monkeypatch):
 
 
 def test_unknown_api_path_stays_api_404(tmp_path, monkeypatch):
+    """Verify unknown API paths return JSON 404 instead of dashboard HTML."""
     web_dir = tmp_path / "web-dist"
     web_dir.mkdir()
     (web_dir / "index.html").write_text("<html><body>dashboard</body></html>", encoding="utf-8")
@@ -216,6 +233,7 @@ def test_unknown_api_path_stays_api_404(tmp_path, monkeypatch):
 
 
 def test_jobs_endpoint_returns_existing_jobs(tmp_path):
+    """Verify jobs endpoint returns newest-first jobs with parent fields."""
     client = TestClient(create_app(config(tmp_path)))
     first = client.post(
         "/api/jobs",
@@ -233,6 +251,11 @@ def test_jobs_endpoint_returns_existing_jobs(tmp_path):
     jobs = data["jobs"]
     assert [job["id"] for job in jobs] == [second["id"], first["id"]]
     assert jobs[0]["source"] == "youtube"
+    assert jobs[0]["parent_id"] is None
+    assert jobs[0]["child_count"] == 0
+    assert jobs[0]["child_created_count"] == 0
+    assert jobs[0]["child_duplicate_count"] == 0
+    assert jobs[0]["child_error_count"] == 0
     assert data["limit"] == 25
     assert data["offset"] == 0
     assert data["total"] == 2
@@ -240,6 +263,7 @@ def test_jobs_endpoint_returns_existing_jobs(tmp_path):
 
 
 def test_jobs_endpoint_paginates_existing_jobs(tmp_path):
+    """Verify bounded job pagination over multiple pages."""
     client = TestClient(create_app(config(tmp_path)))
     for index in range(30):
         client.post(
@@ -267,6 +291,7 @@ def test_jobs_endpoint_paginates_existing_jobs(tmp_path):
 
 
 def test_jobs_endpoint_rejects_unbounded_limit(tmp_path):
+    """Verify job listing rejects limits above the API cap."""
     client = TestClient(create_app(config(tmp_path)))
 
     response = client.get("/api/jobs?limit=101")
@@ -275,6 +300,7 @@ def test_jobs_endpoint_rejects_unbounded_limit(tmp_path):
 
 
 def test_create_job_endpoint_creates_and_processes_job(tmp_path):
+    """Verify create-job endpoint processes immediately by default."""
     client = TestClient(create_app(config(tmp_path)))
 
     response = client.post("/api/jobs", json={"url": "https://youtube.com/watch?v=abc"})
@@ -288,6 +314,7 @@ def test_create_job_endpoint_creates_and_processes_job(tmp_path):
 
 
 def test_create_job_endpoint_dedupes_by_default(tmp_path):
+    """Verify create-job endpoint dedupes normalized URLs."""
     client = TestClient(create_app(config(tmp_path)))
 
     first = client.post(
@@ -308,6 +335,7 @@ def test_create_job_endpoint_dedupes_by_default(tmp_path):
 
 
 def test_create_job_endpoint_allows_forced_duplicate(tmp_path):
+    """Verify create-job endpoint can create explicit duplicate jobs."""
     client = TestClient(create_app(config(tmp_path)))
 
     first = client.post(
@@ -330,6 +358,7 @@ def test_create_job_endpoint_allows_forced_duplicate(tmp_path):
 
 
 def test_create_job_endpoint_rejects_unsupported_url(tmp_path):
+    """Verify create-job endpoint rejects unknown URL sources."""
     client = TestClient(create_app(config(tmp_path)))
 
     response = client.post("/api/jobs", json={"url": "https://example.com/item"})
@@ -339,6 +368,7 @@ def test_create_job_endpoint_rejects_unsupported_url(tmp_path):
 
 
 def test_retry_endpoint_marks_retry_and_respects_queue_only(tmp_path):
+    """Verify retry endpoint can queue retry without processing."""
     client = TestClient(create_app(config(tmp_path)))
     job = client.post(
         "/api/jobs",
@@ -355,6 +385,7 @@ def test_retry_endpoint_marks_retry_and_respects_queue_only(tmp_path):
 
 
 def test_retry_endpoint_returns_404_for_unknown_job(tmp_path):
+    """Verify retry endpoint returns 404 for absent jobs."""
     client = TestClient(create_app(config(tmp_path)))
 
     response = client.post("/api/jobs/404/retry", json={"queue_only": True})
@@ -363,6 +394,7 @@ def test_retry_endpoint_returns_404_for_unknown_job(tmp_path):
 
 
 def test_skip_endpoint_marks_skipped_with_reason(tmp_path):
+    """Verify skip endpoint stores status and reason."""
     client = TestClient(create_app(config(tmp_path)))
     job = client.post(
         "/api/jobs",
@@ -379,6 +411,7 @@ def test_skip_endpoint_marks_skipped_with_reason(tmp_path):
 
 
 def test_run_endpoint_processes_queued_jobs(tmp_path):
+    """Verify manual run endpoint processes one queued job."""
     client = TestClient(create_app(config(tmp_path)))
     client.post(
         "/api/jobs",
@@ -393,6 +426,7 @@ def test_run_endpoint_processes_queued_jobs(tmp_path):
 
 
 def test_import_queue_endpoint_imports_queue_files(tmp_path):
+    """Verify queue import endpoint summarizes imported rows."""
     cfg = config(tmp_path)
     cfg.ensure_dirs()
     (cfg.queue_dir / "inbox.txt").write_text(
@@ -413,3 +447,38 @@ def test_import_queue_endpoint_imports_queue_files(tmp_path):
     assert data["rows"][0]["job"]["status"] == "queued"
     assert data["rows"][1]["created"] is False
     assert data["rows"][2]["error"] == "unsupported url: https://example.com/nope"
+
+
+def test_clear_history_endpoint_deletes_jobs_and_archive(tmp_path):
+    """Verify clear-history endpoint deletes jobs and the YouTube archive."""
+    cfg = config(tmp_path)
+    cfg.ensure_dirs()
+    cfg.yt_archive_path.write_text("youtube abc\n", encoding="utf-8")
+    client = TestClient(create_app(cfg))
+    client.post(
+        "/api/jobs",
+        json={"url": "https://youtube.com/watch?v=abc", "queue_only": True},
+    )
+
+    response = client.post("/api/jobs/clear-history")
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted_jobs": 1, "archive_deleted": True}
+    assert client.get("/api/jobs").json()["total"] == 0
+    assert not cfg.yt_archive_path.exists()
+
+
+def test_clear_history_endpoint_rejects_running_job(tmp_path):
+    """Verify clear-history endpoint rejects cleanup while a job is running."""
+    cfg = config(tmp_path)
+    cfg.ensure_dirs()
+    db = Database(cfg.db_path)
+    job, _ = db.add_job(Source.YOUTUBE, "raw", "normalized")
+    db.mark_running(job.id)
+    db.close()
+    client = TestClient(create_app(cfg))
+
+    response = client.post("/api/jobs/clear-history")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "cannot clear history while a job is running"}

@@ -1,3 +1,5 @@
+"""Persist user-adjustable download policies in the state directory."""
+
 from __future__ import annotations
 
 import json
@@ -9,8 +11,8 @@ from media_dl.download_plan import (
     ALLOWED_METADATA_MODES,
     ALLOWED_OUTPUT_LAYOUTS,
     ALLOWED_PLAYLIST_MODES,
-    METADATA_MODE_SOURCE,
-    OUTPUT_LAYOUT_SOURCE_FOLDERS,
+    DEFAULT_METADATA_MODE,
+    DEFAULT_OUTPUT_LAYOUT,
     PLAYLIST_MODE_SINGLE_JOB,
 )
 
@@ -19,14 +21,14 @@ ALLOWED_AUDIO_FORMATS: tuple[str, ...] = ("m4a", "mp3", "flac", "opus", "wav")
 ALLOWED_THUMBNAIL_MODES: tuple[str, ...] = ("source", "default", "none")
 DEFAULT_AUDIO_FORMAT = "m4a"
 DEFAULT_THUMBNAIL_MODE = "source"
-DEFAULT_OUTPUT_LAYOUT = OUTPUT_LAYOUT_SOURCE_FOLDERS
-DEFAULT_METADATA_MODE = METADATA_MODE_SOURCE
 DEFAULT_PLAYLIST_MODE = PLAYLIST_MODE_SINGLE_JOB
 SETTINGS_FILENAME = "runtime-settings.json"
 
 
 @dataclass(frozen=True)
 class RuntimeSettings:
+    """Capture settings that override static environment defaults at runtime."""
+
     audio_format: str
     thumbnail_mode: str
     output_layout: str
@@ -35,10 +37,12 @@ class RuntimeSettings:
 
 
 def runtime_settings_path(config: Config) -> Path:
+    """Return the JSON settings path under the state mount."""
     return config.state_dir / SETTINGS_FILENAME
 
 
 def load_runtime_settings(config: Config) -> RuntimeSettings:
+    """Load persisted settings, falling back to valid defaults for missing values."""
     config.ensure_dirs()
     path = runtime_settings_path(config)
     persisted = _read_persisted_settings(path)
@@ -67,6 +71,7 @@ def save_runtime_settings(
     metadata_mode: str = DEFAULT_METADATA_MODE,
     playlist_mode: str = DEFAULT_PLAYLIST_MODE,
 ) -> RuntimeSettings:
+    """Validate and persist all runtime settings atomically as JSON text."""
     if audio_format not in ALLOWED_AUDIO_FORMATS:
         raise ValueError(f"unsupported audio format: {audio_format}")
     if thumbnail_mode not in ALLOWED_THUMBNAIL_MODES:
@@ -105,6 +110,7 @@ def save_runtime_settings(
 
 
 def _read_persisted_settings(path: Path) -> dict[str, str]:
+    """Read only recognized and currently allowed settings from disk."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):

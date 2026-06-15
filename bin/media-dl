@@ -1,0 +1,632 @@
+#!/usr/bin/env python3
+"""Host-side CLI wrapper for the Navidrome Media Downloader service."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+import time
+import webbrowser
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+
+DEFAULT_PORT = "8765"
+DEFAULT_LIMIT = 10
+HEALTH_TIMEOUT_SECONDS = 30
+SETTING_ALIASES = {
+    "format": "audio_format",
+    "audio": "audio_format",
+    "audio_format": "audio_format",
+    "thumbnail": "thumbnail_mode",
+    "thumbnail_mode": "thumbnail_mode",
+    "layout": "output_layout",
+    "output": "output_layout",
+    "output_layout": "output_layout",
+    "metadata": "metadata_mode",
+    "metadata_mode": "metadata_mode",
+    "playlist": "playlist_mode",
+    "playlist_mode": "playlist_mode",
+}
+SETTING_LABELS = {
+    "audio_format": "Audio Format",
+    "thumbnail_mode": "Thumbnail Mode",
+    "output_layout": "Library Layout",
+    "metadata_mode": "Metadata Mode",
+    "playlist_mode": "Playlist Handling",
+}
+SETTING_OPTIONS = {
+    "audio_format": "audio_formats",
+    "thumbnail_mode": "thumbnail_modes",
+    "output_layout": "output_layouts",
+    "metadata_mode": "metadata_modes",
+    "playlist_mode": "playlist_modes",
+}
+
+
+class CliError(RuntimeError):
+    """Report a user-facing CLI error without a traceback."""
+
+
+@dataclass(frozen=True)
+class Context:
+    """Carry host wrapper paths and the resolved service URL."""
+
+    repo_root: Path
+    base_url: str
+
+
+class ApiClient:
+    """Call the localhost downloader API with small JSON helpers."""
+
+    def __init__(self, base_url: str):
+        """Store the normalized API base URL."""
+        self.base_url = base_url.rstrip("/")
+
+    def request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
+        """Send one JSON request and decode the JSON response."""
+        body = None
+        headers = {"Accept": "application/json"}
+        if payload is not None:
+            body = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = Request(f"{self.base_url}{path}", data=body, headers=headers, method=method)
+        try:
+            with urlopen(request, timeout=10) as response:
+                data = response.read()
+        except HTTPError as exc:
+            detail = _decode_http_error(exc)
+            raise CliError(f"API error {exc.code}: {detail}") from exc
+        except URLError as exc:
+            raise ConnectionError(str(exc.reason)) from exc
+        except TimeoutError as exc:
+            raise ConnectionError("request timed out") from exc
+        if not data:
+            return None
+        return json.loads(data.decode("utf-8"))
+
+    def health(self) -> dict[str, Any]:
+        """Return service health."""
+        return self.request("GET", "/api/health")
+
+    def settings(self) -> dict[str, Any]:
+        """Return current runtime settings and allowed values."""
+        return self.request("GET", "/api/settings")
+
+    def save_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        """Persist runtime settings."""
+        return self.request("PUT", "/api/settings", settings)
+
+    def jobs(self, limit: int) -> dict[str, Any]:
+        """Return recent jobs."""
+        return self.request("GET", f"/api/jobs?limit={limit}")
+
+    def add_job(self, url: str, queue_only: bool, allow_duplicate: bool) -> dict[str, Any]:
+        """Submit a URL job."""
+        return self.request(
+            "POST",
+            "/api/jobs",
+            {
+                "url": url,
+                "queue_only": queue_only,
+                "allow_duplicate": allow_duplicate,
+            },
+        )
+
+    def run_jobs(self, max_jobs: int | None) -> dict[str, Any]:
+        """Process queued jobs."""
+        return self.request("POST", "/api/run", {"max_jobs": max_jobs})
+
+    def import_queue(self) -> dict[str, Any]:
+        """Import queue files."""
+        return self.request("POST", "/api/import-queue")
+
+    def retry(self, job_id: int, queue_only: bool) -> dict[str, Any]:
+        """Retry a failed job."""
+        return self.request("POST", f"/api/jobs/{job_id}/retry", {"queue_only": queue_only})
+
+    def skip(self, job_id: int, reason: str) -> dict[str, Any]:
+        """Skip a bad job."""
+        return self.request("POST", f"/api/jobs/{job_id}/skip", {"reason": reason})
+
+    def clear_history(self) -> dict[str, Any]:
+        """Clear job history and the YouTube archive."""
+        return self.request("POST", "/api/jobs/clear-history")
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Parse host CLI arguments and dispatch to lifecycle, API, or shell commands."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    ctx = Context(repo_root=_repo_root(), base_url=_base_url(args.url))
+
+    try:
+        if args.command is None:
+            return run_shell(ctx)
+        if args.command == "help":
+            parser.print_help()
+            return 0
+        if args.command in {"up", "down", "rebuild", "logs"}:
+            return run_lifecycle(ctx, args.command)
+        if args.command == "open":
+            webbrowser.open(ctx.base_url)
+            print(ctx.base_url)
+            return 0
+        if args.command == "doctor":
+            return doctor(ctx)
+        return run_api_command(ctx, args)
+    except CliError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print()
+        return 130
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the one-shot command parser."""
+    parser = argparse.ArgumentParser(prog="media-dl")
+    parser.add_argument("--url", help="override API base URL, e.g. http://127.0.0.1:8765")
+    sub = parser.add_subparsers(dest="command")
+
+    sub.add_parser("help", help="show this help")
+    sub.add_parser("up", help="start the Docker service")
+    sub.add_parser("down", help="stop the Docker service")
+    sub.add_parser("rebuild", help="rebuild and start the Docker service")
+    sub.add_parser("logs", help="follow Docker service logs")
+    sub.add_parser("open", help="open the dashboard")
+    sub.add_parser("doctor", help="run host and service diagnostics")
+
+    add = sub.add_parser("add", help="add a YouTube or Spotify URL")
+    add.add_argument("media_url")
+    add.add_argument("--queue-only", action="store_true")
+    add.add_argument("--allow-duplicate", action="store_true")
+
+    status = sub.add_parser("status", help="show recent jobs")
+    status.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
+
+    run = sub.add_parser("run", help="process queued jobs")
+    run.add_argument("--max-jobs", type=int)
+
+    sub.add_parser("import-queue", help="import queue files")
+
+    retry = sub.add_parser("retry", help="retry a failed job")
+    retry.add_argument("job_id", type=int)
+    retry.add_argument("--queue-only", action="store_true")
+
+    skip = sub.add_parser("skip", help="skip a bad job")
+    skip.add_argument("job_id", type=int)
+    skip.add_argument("--reason", default="manually skipped")
+
+    sub.add_parser("settings", help="show runtime settings")
+
+    set_parser = sub.add_parser("set", help="change a runtime setting")
+    set_parser.add_argument("setting")
+    set_parser.add_argument("value")
+
+    clear = sub.add_parser("clear-history", help="clear job history and YouTube archive")
+    clear.add_argument("-f", "--force", action="store_true", help="confirm the destructive action")
+
+    return parser
+
+
+def run_api_command(ctx: Context, args: argparse.Namespace) -> int:
+    """Run a one-shot command that talks to the service API."""
+    client = api_client_or_start(ctx)
+    if args.command == "add":
+        result = client.add_job(args.media_url, args.queue_only, args.allow_duplicate)
+        print_add_result(result)
+        return _exit_for_processed(result.get("processed"))
+    if args.command == "status":
+        print_status(client.jobs(args.limit))
+        return 0
+    if args.command == "run":
+        result = client.run_jobs(args.max_jobs)
+        print(f"processed {result['processed']} job(s)")
+        return 0
+    if args.command == "import-queue":
+        result = client.import_queue()
+        print(
+            f"imported {result['imported']} job(s), "
+            f"{result['duplicates']} duplicate(s), {result['errors']} error(s)"
+        )
+        return 0
+    if args.command == "retry":
+        result = client.retry(args.job_id, args.queue_only)
+        print(f"retry queued: job {result['job']['id']}")
+        return _exit_for_processed(result.get("processed"))
+    if args.command == "skip":
+        result = client.skip(args.job_id, args.reason)
+        print(f"skipped: job {result['job']['id']}")
+        return 0
+    if args.command == "settings":
+        print_settings(client.settings())
+        return 0
+    if args.command == "set":
+        set_setting(client, args.setting, args.value)
+        return 0
+    if args.command == "clear-history":
+        if not args.force:
+            raise CliError("refusing to clear history without -f; music files and settings are kept")
+        result = client.clear_history()
+        archive = "removed" if result["archive_deleted"] else "not present"
+        print(f"cleared {result['deleted_jobs']} job(s); yt-dlp archive {archive}")
+        return 0
+    raise CliError(f"unknown command: {args.command}")
+
+
+def run_shell(ctx: Context) -> int:
+    """Run the interactive slash-command shell."""
+    print("Navidrome Media Downloader shell. Type /help for commands, /exit to quit.")
+    while True:
+        try:
+            line = input("media-dl> ").strip()
+        except EOFError:
+            print()
+            return 0
+        if not line:
+            continue
+        try:
+            if dispatch_shell_line(ctx, line):
+                return 0
+        except CliError as exc:
+            print(str(exc), file=sys.stderr)
+
+
+def dispatch_shell_line(ctx: Context, line: str) -> bool:
+    """Dispatch one slash-command shell line and return True when exiting."""
+    parts = shlex.split(line)
+    if not parts:
+        return False
+    command = parts[0]
+    if not command.startswith("/"):
+        raise CliError("shell commands must start with /; try /help")
+    name = command[1:]
+    if name in {"exit", "quit"}:
+        return True
+    if name == "help":
+        print_shell_help()
+        return False
+    if name == "clear-history":
+        if not _confirm("Clear all job history and the YouTube archive? Music and settings are kept."):
+            print("cancelled")
+            return False
+        client = api_client_or_start(ctx)
+        result = client.clear_history()
+        archive = "removed" if result["archive_deleted"] else "not present"
+        print(f"cleared {result['deleted_jobs']} job(s); yt-dlp archive {archive}")
+        return False
+    argv = _shell_to_argv(name, parts[1:])
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command in {"up", "down", "rebuild", "logs"}:
+        run_lifecycle(ctx, args.command)
+    elif args.command == "open":
+        webbrowser.open(ctx.base_url)
+        print(ctx.base_url)
+    elif args.command == "doctor":
+        doctor(ctx)
+    else:
+        run_api_command(ctx, args)
+    return False
+
+
+def _shell_to_argv(name: str, rest: list[str]) -> list[str]:
+    """Translate slash commands to one-shot parser arguments."""
+    aliases = {
+        "settings": "settings",
+        "set": "set",
+        "add": "add",
+        "status": "status",
+        "run": "run",
+        "import-queue": "import-queue",
+        "retry": "retry",
+        "skip": "skip",
+        "open": "open",
+        "doctor": "doctor",
+        "up": "up",
+        "down": "down",
+        "rebuild": "rebuild",
+        "logs": "logs",
+    }
+    if name not in aliases:
+        raise CliError(f"unknown command: /{name}; try /help")
+    return [aliases[name], *rest]
+
+
+def print_shell_help() -> None:
+    """Print interactive shell commands."""
+    print(
+        "\n".join(
+            [
+                "/settings",
+                "/set format opus",
+                "/add <url> [--queue-only] [--allow-duplicate]",
+                f"/status [--limit N]  default {DEFAULT_LIMIT}",
+                "/run [--max-jobs N]",
+                "/import-queue",
+                "/retry <job-id> [--queue-only]",
+                "/skip <job-id> [--reason \"...\"]",
+                "/clear-history",
+                "/open",
+                "/doctor",
+                "/up | /down | /rebuild | /logs",
+                "/exit",
+            ]
+        )
+    )
+
+
+def api_client_or_start(ctx: Context) -> ApiClient:
+    """Return an API client, offering to start Compose when the service is down."""
+    client = ApiClient(ctx.base_url)
+    try:
+        client.health()
+        return client
+    except ConnectionError:
+        if not sys.stdin.isatty():
+            raise CliError(f"service is not available at {ctx.base_url}; run `media-dl up`")
+        if not _confirm(f"Service is not available at {ctx.base_url}. Start it with docker compose up -d?"):
+            raise CliError("service is not running")
+        compose(ctx, ["up", "-d"])
+        wait_for_health(client)
+        return client
+
+
+def wait_for_health(client: ApiClient) -> None:
+    """Wait for the service health endpoint after starting Compose."""
+    deadline = time.monotonic() + HEALTH_TIMEOUT_SECONDS
+    last_error = "service did not respond"
+    while time.monotonic() < deadline:
+        try:
+            client.health()
+            return
+        except ConnectionError as exc:
+            last_error = str(exc)
+            time.sleep(1)
+    raise CliError(f"service did not become healthy: {last_error}")
+
+
+def run_lifecycle(ctx: Context, command: str) -> int:
+    """Run Docker Compose lifecycle commands from the repo root."""
+    if command == "up":
+        compose(ctx, ["up", "-d"])
+    elif command == "down":
+        compose(ctx, ["down"])
+    elif command == "rebuild":
+        compose(ctx, ["up", "-d", "--build"])
+    elif command == "logs":
+        compose(ctx, ["logs", "-f", "downloader"])
+    else:
+        raise CliError(f"unknown lifecycle command: {command}")
+    return 0
+
+
+def doctor(ctx: Context) -> int:
+    """Print host, Compose, service, and container diagnostics."""
+    ok = True
+    ok = _doctor_command(["docker", "--version"], "Docker") and ok
+    ok = _doctor_command(["docker", "compose", "version"], "Docker Compose") and ok
+    compose_file = ctx.repo_root / "docker-compose.yml"
+    print(f"{'ok' if compose_file.exists() else 'missing'}: compose file {compose_file}")
+    ok = compose_file.exists() and ok
+    client = ApiClient(ctx.base_url)
+    try:
+        health = client.health()
+        print(f"ok: service health {health.get('status')} version={health.get('version')}")
+        runtime = client.request("GET", "/api/runtime")
+        print(f"ok: music={runtime['music_root']} state={runtime['state_dir']} queue={runtime['queue_dir']}")
+    except (ConnectionError, CliError) as exc:
+        print(f"warn: service unavailable at {ctx.base_url}: {exc}")
+        ok = False
+    for label, command in [
+        ("yt-dlp", ["exec", "-T", "downloader", "yt-dlp", "--version"]),
+        ("spotDL", ["exec", "-T", "downloader", "spotdl", "--version"]),
+        ("ffmpeg", ["exec", "-T", "downloader", "ffmpeg", "-version"]),
+        ("Deno", ["exec", "-T", "downloader", "deno", "--version"]),
+    ]:
+        ok = _doctor_compose(ctx, command, label) and ok
+    return 0 if ok else 1
+
+
+def _doctor_command(command: list[str], label: str) -> bool:
+    """Run one host diagnostic command."""
+    try:
+        completed = subprocess.run(command, check=False, text=True, capture_output=True)
+    except FileNotFoundError:
+        print(f"missing: {label}")
+        return False
+    first_line = (completed.stdout or completed.stderr).splitlines()[0:1]
+    if completed.returncode == 0:
+        print(f"ok: {label} {first_line[0] if first_line else ''}".rstrip())
+        return True
+    print(f"fail: {label} {first_line[0] if first_line else ''}".rstrip())
+    return False
+
+
+def _doctor_compose(ctx: Context, command: list[str], label: str) -> bool:
+    """Run one container diagnostic command through Compose."""
+    completed = compose(ctx, command, check=False, capture=True)
+    first_line = (completed.stdout or completed.stderr).splitlines()[0:1]
+    if completed.returncode == 0:
+        print(f"ok: {label} {first_line[0] if first_line else ''}".rstrip())
+        return True
+    print(f"warn: {label} unavailable; is the service running?")
+    return False
+
+
+def compose(
+    ctx: Context,
+    args: list[str],
+    *,
+    check: bool = True,
+    capture: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    """Run docker compose from the repository root."""
+    command = ["docker", "compose", *args]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=ctx.repo_root,
+            check=False,
+            text=True,
+            capture_output=capture,
+        )
+    except FileNotFoundError as exc:
+        raise CliError("docker is not installed or not on PATH") from exc
+    if check and completed.returncode != 0:
+        raise CliError(f"command failed: {' '.join(command)}")
+    return completed
+
+
+def set_setting(client: ApiClient, name: str, value: str) -> dict[str, Any]:
+    """Update one runtime setting by merging with the current settings."""
+    key = SETTING_ALIASES.get(name)
+    if key is None:
+        allowed = ", ".join(sorted(SETTING_ALIASES))
+        raise CliError(f"unknown setting {name!r}; use one of: {allowed}")
+    current = client.settings()
+    option_key = SETTING_OPTIONS[key]
+    if value not in current[option_key]:
+        allowed = ", ".join(current[option_key])
+        raise CliError(f"unsupported {key}: {value}; options: {allowed}")
+    payload = {setting: current[setting] for setting in SETTING_OPTIONS}
+    payload[key] = value
+    result = client.save_settings(payload)
+    print(f"{SETTING_LABELS[key]} set to {result[key]}")
+    return result
+
+
+def print_settings(settings: dict[str, Any]) -> None:
+    """Print current settings and allowed options."""
+    for key in SETTING_OPTIONS:
+        label = SETTING_LABELS[key]
+        current = settings[key]
+        options = ", ".join(value for value in settings[SETTING_OPTIONS[key]] if value != current)
+        print(f"{label}: {{{current}}} options: {options}")
+    if settings.get("default_thumbnail_path"):
+        print(f"Default Thumbnail: {settings['default_thumbnail_path']}")
+
+
+def print_add_result(result: dict[str, Any]) -> None:
+    """Print add-job result details."""
+    job = result["job"]
+    verb = "queued" if result["created"] else "duplicate"
+    if result["created"] and job.get("allow_duplicate"):
+        verb = "queued duplicate"
+    print(f"{verb}: job {job['id']} {job['source']} {job['normalized_url']}")
+    processed = result.get("processed")
+    if processed:
+        print(f"processed: job {processed['id']} {processed['status']}")
+
+
+def print_status(result: dict[str, Any]) -> None:
+    """Print a compact recent-job table."""
+    jobs = result.get("jobs", [])
+    print(f"{result.get('total', len(jobs))} total job(s), showing {len(jobs)}")
+    if not jobs:
+        return
+    print(f"{'ID':>4} {'SOURCE':<7} {'STATUS':<9} {'TRY':>3} {'PARENT/CHILD':<12} {'MESSAGE':<18} URL")
+    for job in jobs:
+        parent_child = _parent_child_label(job)
+        message = _message_label(job)
+        url = _shorten(job["normalized_url"], 64)
+        print(
+            f"{job['id']:>4} {job['source']:<7} {job['status']:<9} "
+            f"{job['attempts']:>3} {parent_child:<12} {message:<18} {url}"
+        )
+
+
+def _parent_child_label(job: dict[str, Any]) -> str:
+    """Return parent/child context for status rows."""
+    if job.get("parent_id") is not None:
+        return f"child of {job['parent_id']}"
+    child_count = job.get("child_count") or 0
+    if child_count:
+        return (
+            f"{job.get('child_created_count', 0)}/"
+            f"{child_count} children"
+        )
+    return "-"
+
+
+def _message_label(job: dict[str, Any]) -> str:
+    """Return a compact warning or error marker."""
+    if job.get("last_error"):
+        return "error"
+    if job.get("last_warning"):
+        return "warning"
+    return "-"
+
+
+def _shorten(value: str, width: int) -> str:
+    """Shorten long table values."""
+    if len(value) <= width:
+        return value
+    return f"{value[: width - 1]}…"
+
+
+def _exit_for_processed(processed: dict[str, Any] | None) -> int:
+    """Return nonzero when an immediately processed job failed."""
+    if processed and processed.get("status") == "failed":
+        return 1
+    return 0
+
+
+def _confirm(prompt: str) -> bool:
+    """Ask a yes/no question."""
+    answer = input(f"{prompt} [y/N] ").strip().lower()
+    return answer in {"y", "yes"}
+
+
+def _base_url(cli_url: str | None) -> str:
+    """Resolve the service base URL from CLI, environment, .env, or defaults."""
+    if cli_url:
+        return cli_url
+    if os.getenv("MEDIA_DL_URL"):
+        return os.environ["MEDIA_DL_URL"]
+    port = _read_env_file(_repo_root() / ".env").get("SERVICE_PORT", DEFAULT_PORT)
+    return f"http://127.0.0.1:{port}"
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    """Read simple KEY=VALUE lines from a dotenv file."""
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        values[key.strip()] = value.strip().strip("\"'")
+    return values
+
+
+def _repo_root() -> Path:
+    """Return the repository root for this script."""
+    return Path(__file__).resolve().parents[1]
+
+
+def _decode_http_error(exc: HTTPError) -> str:
+    """Decode FastAPI error bodies into a short message."""
+    try:
+        payload = json.loads(exc.read().decode("utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return exc.reason
+    detail = payload.get("detail")
+    return detail if isinstance(detail, str) else str(payload)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

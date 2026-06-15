@@ -1,3 +1,5 @@
+"""Translate jobs and runtime settings into downloader-neutral execution plans."""
+
 from __future__ import annotations
 
 import re
@@ -18,7 +20,7 @@ ALLOWED_OUTPUT_LAYOUTS: tuple[str, ...] = (
     OUTPUT_LAYOUT_CREATOR_FOLDERS,
     OUTPUT_LAYOUT_ARTIST_ALBUM_FOLDERS,
 )
-DEFAULT_OUTPUT_LAYOUT = OUTPUT_LAYOUT_SOURCE_FOLDERS
+DEFAULT_OUTPUT_LAYOUT = OUTPUT_LAYOUT_ARTIST_ALBUM_FOLDERS
 
 METADATA_MODE_SOURCE = "source"
 METADATA_MODE_NAVIDROME_CLEAN = "navidrome_clean"
@@ -26,7 +28,7 @@ ALLOWED_METADATA_MODES: tuple[str, ...] = (
     METADATA_MODE_SOURCE,
     METADATA_MODE_NAVIDROME_CLEAN,
 )
-DEFAULT_METADATA_MODE = METADATA_MODE_SOURCE
+DEFAULT_METADATA_MODE = METADATA_MODE_NAVIDROME_CLEAN
 
 PLAYLIST_MODE_SINGLE_JOB = "single_job"
 PLAYLIST_MODE_EXPAND_ITEMS = "expand_items"
@@ -40,6 +42,8 @@ COLLISION_SUFFIX_JOB_ID = "job_id"
 
 
 class DownloadSettings(Protocol):
+    """Describe the runtime settings needed to build a download plan."""
+
     audio_format: str
     thumbnail_mode: str
     output_layout: str
@@ -49,6 +53,8 @@ class DownloadSettings(Protocol):
 
 @dataclass(frozen=True)
 class OutputLayout:
+    """Describe where a downloader writes files and which layout it represents."""
+
     name: str
     output_root: Path
     output_template: str
@@ -57,6 +63,8 @@ class OutputLayout:
 
 @dataclass(frozen=True)
 class MetadataPolicy:
+    """Describe metadata cleanup behavior after downloader completion."""
+
     mode: str
     album_artist_fallback: str = "copy_artist"
     multi_artist_policy: str = "preserve_list"
@@ -65,12 +73,16 @@ class MetadataPolicy:
 
 @dataclass(frozen=True)
 class PlaylistPolicy:
+    """Describe how playlist parent jobs should be treated."""
+
     mode: str
     parent_behavior: str = "import_summary"
 
 
 @dataclass(frozen=True)
 class DownloadPlan:
+    """Combine source, layout, metadata, playlist, archive, and duplicate decisions."""
+
     source: Source
     url: str
     duplicate_job_id: int | None
@@ -84,6 +96,7 @@ class DownloadPlan:
 
 
 def plan_download(config: Config, job: Job, settings: DownloadSettings) -> DownloadPlan:
+    """Build a complete download plan for one job."""
     duplicate_job_id = job.id if job.allow_duplicate else None
     layout = _output_layout(
         config=config,
@@ -105,6 +118,7 @@ def plan_download(config: Config, job: Job, settings: DownloadSettings) -> Downl
 
 
 def creator_path(root: Path, creator: str, title: str, extension: str) -> Path:
+    """Build a creator-folder file path with safe fallback names."""
     return root / sanitize_path_part(creator or "Unknown Artist") / _file_name(title, extension)
 
 
@@ -117,6 +131,7 @@ def artist_album_path(
     track_number: str | int | None = None,
     creator: str | None = None,
 ) -> Path:
+    """Build an artist/album path, falling back to artist-root singles when album is absent."""
     clean_artist = sanitize_path_part(artist or creator or "Unknown Artist")
     clean_title = sanitize_path_part(title or "Unknown Title")
     if not album:
@@ -128,10 +143,12 @@ def artist_album_path(
 
 
 def collision_path(path: Path, job_id: int) -> Path:
+    """Return a path variant marked with the job id to avoid overwriting files."""
     return path.with_name(f"{path.stem} [job-{job_id}]{path.suffix}")
 
 
 def sanitize_path_part(value: str) -> str:
+    """Remove path separators and control characters from one path segment."""
     cleaned = re.sub(r"[\x00-\x1f/\\]+", " ", value)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned or "Unknown Artist"
@@ -143,6 +160,7 @@ def _output_layout(
     requested_layout: str,
     duplicate_job_id: int | None,
 ) -> OutputLayout:
+    """Select the effective layout, with duplicate jobs isolated under Duplicates."""
     if duplicate_job_id is not None:
         return _duplicate_layout(config, source, duplicate_job_id, requested_layout)
     if requested_layout == OUTPUT_LAYOUT_CREATOR_FOLDERS:
@@ -153,6 +171,7 @@ def _output_layout(
 
 
 def _source_layout(config: Config, source: Source) -> OutputLayout:
+    """Return the legacy source-root layout for a source."""
     if source == Source.YOUTUBE:
         output_root = config.music_root / "YouTube"
         template = str(
@@ -189,6 +208,7 @@ def _source_layout(config: Config, source: Source) -> OutputLayout:
 
 
 def _creator_layout(config: Config, source: Source, requested_layout: str) -> OutputLayout:
+    """Return the creator-root layout for sources without reliable album metadata."""
     if source == Source.YOUTUBE:
         template = str(
             config.music_root
@@ -208,6 +228,7 @@ def _creator_layout(config: Config, source: Source, requested_layout: str) -> Ou
 
 
 def _artist_album_layout(config: Config, source: Source, requested_layout: str) -> OutputLayout:
+    """Return the Navidrome-friendly artist/album layout where source metadata supports it."""
     if source == Source.SPOTIFY:
         template = str(
             config.music_root
@@ -230,6 +251,7 @@ def _duplicate_layout(
     duplicate_job_id: int,
     requested_layout: str,
 ) -> OutputLayout:
+    """Return an isolated output layout for explicit duplicate redownloads."""
     source_name = "YouTube" if source == Source.YOUTUBE else "Spotify"
     output_root = config.music_root / "Duplicates" / str(duplicate_job_id) / source_name
     if source == Source.YOUTUBE:
@@ -254,5 +276,6 @@ def _duplicate_layout(
 
 
 def _file_name(stem: str, extension: str) -> str:
+    """Build a sanitized filename with a normalized extension prefix."""
     suffix = extension if extension.startswith(".") else f".{extension}"
     return f"{sanitize_path_part(stem)}{suffix}"

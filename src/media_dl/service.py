@@ -1,3 +1,5 @@
+"""Serve the localhost FastAPI API and bundled dashboard."""
+
 from __future__ import annotations
 
 from collections.abc import Iterator
@@ -20,8 +22,10 @@ from media_dl.download_plan import (
     ALLOWED_PLAYLIST_MODES,
 )
 from media_dl.jobs import (
+    ClearHistoryBlockedError,
     UnsupportedUrlError,
     add_url,
+    clear_history,
     import_queue_files,
     list_recent_jobs,
     retry_job,
@@ -40,6 +44,8 @@ WEB_DIST_DIR = Path(__file__).with_name("static")
 
 
 class JobResponse(BaseModel):
+    """Serialize a job row for API and dashboard consumers."""
+
     id: int
     source: str
     raw_url: str
@@ -52,38 +58,57 @@ class JobResponse(BaseModel):
     dedupe_key: str
     duplicate_of: int | None
     allow_duplicate: bool
+    parent_id: int | None
+    child_count: int
+    child_created_count: int
+    child_duplicate_count: int
+    child_error_count: int
 
 
 class AddJobRequest(BaseModel):
+    """Accept a URL submission with queueing and duplicate options."""
+
     url: str
     queue_only: bool = False
     allow_duplicate: bool = False
 
 
 class RetryJobRequest(BaseModel):
+    """Accept retry options for a job action."""
+
     queue_only: bool = False
 
 
 class SkipJobRequest(BaseModel):
+    """Accept a manual skip reason."""
+
     reason: str = "manual skip"
 
 
 class RunJobsRequest(BaseModel):
+    """Accept a bounded manual run request."""
+
     max_jobs: int | None = Field(default=1, ge=1)
 
 
 class AddJobResponse(BaseModel):
+    """Return add-job state plus optional immediate processing result."""
+
     job: JobResponse
     created: bool
     processed: JobResponse | None
 
 
 class JobActionResponse(BaseModel):
+    """Return a changed job plus optional immediate processing result."""
+
     job: JobResponse
     processed: JobResponse | None = None
 
 
 class JobListResponse(BaseModel):
+    """Return one paginated job list response."""
+
     jobs: list[JobResponse]
     limit: int
     offset: int
@@ -92,16 +117,29 @@ class JobListResponse(BaseModel):
 
 
 class RunJobsResponse(BaseModel):
+    """Return how many queued jobs a manual run processed."""
+
     processed: int
 
 
+class ClearHistoryResponse(BaseModel):
+    """Return clear-history counts and archive deletion state."""
+
+    deleted_jobs: int
+    archive_deleted: bool
+
+
 class ImportQueueRowResponse(BaseModel):
+    """Return one imported queue line result."""
+
     job: JobResponse | None
     created: bool
     error: str | None
 
 
 class ImportQueueResponse(BaseModel):
+    """Summarize an explicit queue file import."""
+
     imported: int
     duplicates: int
     errors: int
@@ -109,6 +147,8 @@ class ImportQueueResponse(BaseModel):
 
 
 class RuntimeSettingsResponse(BaseModel):
+    """Return current runtime settings and allowed values for dashboard controls."""
+
     audio_format: str
     audio_formats: list[str]
     thumbnail_mode: str
@@ -123,6 +163,8 @@ class RuntimeSettingsResponse(BaseModel):
 
 
 class UpdateRuntimeSettingsRequest(BaseModel):
+    """Accept a full or partially backward-compatible settings update."""
+
     audio_format: str
     thumbnail_mode: str = "source"
     output_layout: str | None = None
@@ -131,6 +173,7 @@ class UpdateRuntimeSettingsRequest(BaseModel):
 
 
 def create_app(config: Config | None = None) -> FastAPI:
+    """Create the FastAPI app with API routes and static dashboard fallback."""
     cfg = config or load_config()
     app = FastAPI(title="Navidrome Media Downloader", version=__version__)
     assets_dir = WEB_DIST_DIR / "assets"
@@ -139,6 +182,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
+        """Return a minimal health response for smoke checks."""
         return {
             "status": "ok",
             "version": __version__,
@@ -146,6 +190,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/api/runtime")
     def runtime() -> dict[str, Any]:
+        """Return resolved paths and active runtime settings."""
         current = load_runtime_settings(cfg)
         return {
             "music_root": str(cfg.music_root),
@@ -164,6 +209,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/api/settings", response_model=RuntimeSettingsResponse)
     def settings() -> RuntimeSettingsResponse:
+        """Return persisted settings and allowed option lists."""
         current = load_runtime_settings(cfg)
         return RuntimeSettingsResponse(
             audio_format=current.audio_format,
@@ -181,6 +227,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.put("/api/settings", response_model=RuntimeSettingsResponse)
     def update_settings(request: UpdateRuntimeSettingsRequest) -> RuntimeSettingsResponse:
+        """Persist validated runtime settings."""
         existing = load_runtime_settings(cfg)
         try:
             current = save_runtime_settings(
@@ -212,6 +259,7 @@ def create_app(config: Config | None = None) -> FastAPI:
         limit: int = Query(default=25, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
     ) -> JobListResponse:
+        """Return a bounded newest-first page of jobs."""
         result = list_recent_jobs(cfg, limit=limit, offset=offset)
         return JobListResponse(
             jobs=[_job_response(job) for job in result.jobs],
@@ -223,6 +271,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.post("/api/jobs", response_model=AddJobResponse)
     def create_job(request: AddJobRequest) -> AddJobResponse:
+        """Create or refresh a job and optionally process it immediately."""
         try:
             result = add_url(
                 cfg,
@@ -241,6 +290,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/retry", response_model=JobActionResponse)
     def retry(job_id: int, request: RetryJobRequest) -> JobActionResponse:
+        """Mark a job for retry and optionally process it immediately."""
         try:
             result = retry_job(cfg, job_id, queue_only=request.queue_only)
         except KeyError as exc:
@@ -253,6 +303,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.post("/api/jobs/{job_id}/skip", response_model=JobActionResponse)
     def skip(job_id: int, request: SkipJobRequest) -> JobActionResponse:
+        """Mark a job skipped with a manual reason."""
         try:
             job = skip_job(cfg, job_id, request.reason)
         except KeyError as exc:
@@ -262,30 +313,48 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.post("/api/run", response_model=RunJobsResponse)
     def run_jobs(request: RunJobsRequest) -> RunJobsResponse:
+        """Process a bounded number of queued jobs."""
         return RunJobsResponse(processed=run_queued_jobs(cfg, max_jobs=request.max_jobs))
+
+    @app.post("/api/jobs/clear-history", response_model=ClearHistoryResponse)
+    def clear_job_history() -> ClearHistoryResponse:
+        """Clear job history and the YouTube archive unless a job is running."""
+        try:
+            result = clear_history(cfg)
+        except ClearHistoryBlockedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return ClearHistoryResponse(
+            deleted_jobs=result.deleted_jobs,
+            archive_deleted=result.archive_deleted,
+        )
 
     @app.post("/api/import-queue", response_model=ImportQueueResponse)
     def import_queue() -> ImportQueueResponse:
+        """Import standard queue files into jobs without processing them."""
         return _queue_import_response(import_queue_files(cfg))
 
     @app.get("/")
     def web_index() -> FileResponse:
+        """Serve the dashboard entrypoint."""
         return _web_index_response()
 
     @app.get("/{full_path:path}")
     def web_fallback(full_path: str) -> FileResponse:
+        """Serve the dashboard for non-API paths so client routing can work."""
         if full_path == "api" or full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not Found")
         return _web_index_response()
 
     @app.on_event("startup")
     def startup() -> None:
+        """Create required runtime directories when the service starts."""
         cfg.ensure_dirs()
 
     return app
 
 
 def serve(config: Config | None = None) -> None:
+    """Run Uvicorn for the localhost service."""
     cfg = config or load_config()
     uvicorn.run(
         create_app(cfg),
@@ -297,10 +366,12 @@ def serve(config: Config | None = None) -> None:
 
 @contextmanager
 def app_for_tests(config: Config) -> Iterator[FastAPI]:
+    """Yield an app instance for FastAPI TestClient tests."""
     yield create_app(config)
 
 
 def _job_response(job: Job) -> JobResponse:
+    """Convert a Job dataclass into its API response model."""
     return JobResponse(
         id=job.id,
         source=job.source.value,
@@ -314,12 +385,18 @@ def _job_response(job: Job) -> JobResponse:
         dedupe_key=job.dedupe_key,
         duplicate_of=job.duplicate_of,
         allow_duplicate=job.allow_duplicate,
+        parent_id=job.parent_id,
+        child_count=job.child_count,
+        child_created_count=job.child_created_count,
+        child_duplicate_count=job.child_duplicate_count,
+        child_error_count=job.child_error_count,
     )
 
 
 def _queue_import_response(
     results: list[tuple[Job | None, bool, str | None]],
 ) -> ImportQueueResponse:
+    """Convert queue import tuples into API summary and row models."""
     rows = [
         ImportQueueRowResponse(
             job=_job_response(job) if job else None,
@@ -337,6 +414,7 @@ def _queue_import_response(
 
 
 def _web_index_response() -> FileResponse:
+    """Return the built dashboard index file or a clear 404 when missing."""
     index_path = WEB_DIST_DIR / "index.html"
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="web UI not built")

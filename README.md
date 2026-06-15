@@ -1,35 +1,40 @@
 # Navidrome Media Downloader
+Media downloader for installing audio from YouTube, YouTube Music, and Spotify links with the primary design for writing metadata for Navidrome.
 
-Queue-based downloader for feeding a Navidrome music folder from YouTube and Spotify links.
+The project was created to supplement the issue of getting all the main audio files for Navidrome for homelabs. Host users should not need to install `yt-dlp`, `spotDL`, `ffmpeg`, Deno, or Python dependencies directly. The container serves a localhost-only API and the bundled web dashboard, and downloads happen only when a CLI command, API request, or dashboard action asks for work.
 
-This project stores audio only in the current implementation. YouTube links are downloaded with `yt-dlp`. Spotify links are handled by `spotDL`, which uses Spotify as the metadata/catalog source and downloads matched audio from YouTube Music/YouTube.
+WARNING: for those who are hosting this on a homelab do NOT expose this service. Simple security logins will be added for the next update, but this is intended to be on a local computer only (ngl i mostly made this shit for myself). 
 
 ## Layout
 
 ```text
 /music       Navidrome music library mount
-/queue       watched input files
-/state       SQLite database and yt-dlp archive
-/downloads   temporary files and logs
+/queue       optional text queue files
+/state       SQLite database, runtime settings, lock file, and yt-dlp archive
+/downloads   temporary download files
+/config      default artwork and app config files
 ```
 
-The long-running Docker service exposes a localhost-only runtime API at:
+The service and dashboard are available at:
 
 ```text
-http://127.0.0.1:8765
+http://localhost:SERVICE_PORT
 ```
 
-The same address serves the web dashboard. If you set `SERVICE_PORT` in `.env`, open that port instead:
+Refer to .env.example to see the ideal .env or docker env setup.
+
+Default output is organized for Navidrome indexing:
 
 ```text
-http://127.0.0.1:${SERVICE_PORT}
+/music/<artist-or-creator>/<title>.formatType
+/music/<artist>/<album>/<track-number> - <title>.formatType
 ```
 
-Default output:
+The legacy source-folder layout is still available from settings:
 
 ```text
-/music/YouTube/<playlist-or-uploader>/<index> - <title>.m4a
-/music/Spotify/<album-artist>/<album>/<track-number> - <title>.m4a
+/music/YouTube/<playlist-or-uploader>/<index> - <title>.formatType
+/music/Spotify/<album-artist>/<album>/<track-number> - <title>.formatType
 ```
 
 ## Start
@@ -37,7 +42,7 @@ Default output:
 Create host folders:
 
 ```bash
-mkdir -p music queue state downloads
+mkdir -p music queue state downloads config
 ```
 
 Optionally point Compose at your existing Navidrome music folder:
@@ -45,15 +50,104 @@ Optionally point Compose at your existing Navidrome music folder:
 ```bash
 cp .env.example .env
 # edit .env so NAVIDROME_MUSIC_ROOT points at your real Navidrome music folder
-docker compose up -d --build
+./bin/media-dl up
 ```
 
-Navidrome should mount the same host folder read-only or read-write as its music library.
-The downloader also mounts `${NAVIMEDIA_CONFIG:-./config}` at `/config`; place an editable `default.jpg` there for the configured default thumbnail path.
+Navidrome should mount the same host folder as its music library. The downloader also mounts `${NAVIMEDIA_CONFIG:-./config}` at `/config`; place `default.jpg` there if you use default artwork mode.
+
+Use `./bin/media-dl rebuild` when you want the same behavior as `docker compose up -d --build`.
+
+## Host CLI
+
+The host CLI is the preferred way to operate the downloader from this repo:
+
+```bash
+./bin/media-dl up
+./bin/media-dl open
+./bin/media-dl add "https://youtube.com/watch?v=..."
+./bin/media-dl add --queue-only "https://youtube.com/playlist?list=..."
+./bin/media-dl status
+./bin/media-dl run
+./bin/media-dl settings
+./bin/media-dl set format opus
+./bin/media-dl clear-history -f
+```
+
+With no arguments, it opens a simple slash-command shell:
+
+```text
+./bin/media-dl
+media-dl> /settings
+media-dl> /set format opus
+media-dl> /add https://youtube.com/watch?v=...
+media-dl> /status
+media-dl> /exit
+```
+
+`settings` and `/settings` show current values and allowed options. Friendly setting names are available for `set` and `/set`:
+
+```text
+format     audio_format
+thumbnail  thumbnail_mode
+layout     output_layout
+metadata   metadata_mode
+playlist   playlist_mode
+```
+
+The CLI talks to the localhost API by default. If the service is down and the terminal is interactive, it offers to start Docker Compose and retry the command. Set `MEDIA_DL_URL` or pass `--url` to target another service URL.
+
+## Dashboard
+
+Open:
+
+```bash
+./bin/media-dl open
+```
+
+The dashboard supports:
+
+- Submit YouTube, YouTube Music, and Spotify URLs.
+- Queue-only submission for later manual runs.
+- Forced duplicate redownloads under `/music/Duplicates/<job-id>/`.
+- Paginated job history with parent/child playlist context.
+- Retry, skip, manual run, explicit queue import, and clear history.
+- Runtime settings for audio format, thumbnails, library layout, metadata cleanup, and playlist handling.
+
+Runtime settings persist to:
+
+```text
+/state/runtime-settings.json
+```
+
+## Playlist Handling
+
+Playlist handling is controlled by the dashboard setting `Playlist handling`.
+
+- `Download playlist as one job` keeps current single-job behavior.
+- `Expand playlist into queued items` currently applies to YouTube and YouTube Music playlists.
+
+When expansion is enabled, the parent playlist job extracts child video URLs with `yt-dlp --flat-playlist --dump-single-json`, creates one queued child job per new item, then completes as a summary row. Child jobs are processed later by manual runs or normal job actions. Spotify playlists still use single-job behavior.
+
+## Clear History
+
+The dashboard `Clear history` action clears:
+
+- SQLite job history.
+- URL dedupe history.
+- `/state/yt-dlp.archive`.
+
+It keeps:
+
+- Downloaded music under `/music`.
+- Runtime settings under `/state/runtime-settings.json`.
+- Queue files under `/queue`.
+- Config files under `/config`.
+
+This is the recommended way to get a fresh job history without deleting music.
 
 ## Queue Files
 
-Queue files are available for manual import, but the long-running service does not poll them automatically. Paste links into any of these files:
+Queue files are available for manual import, but the service does not poll them automatically. Paste links into any of these files:
 
 ```text
 queue/inbox.txt
@@ -61,9 +155,11 @@ queue/youtube.txt
 queue/spotify.txt
 ```
 
-Each non-empty, non-comment line is imported. Duplicate normalized URLs are skipped.
+Each non-empty, non-comment line is imported. Duplicate normalized URLs are skipped unless the job was intentionally submitted as a duplicate through another path.
 
-## CLI
+## Container CLI
+
+The lower-level package CLI still runs inside the Docker container:
 
 ```bash
 docker compose run --rm downloader add "https://youtube.com/watch?v=..."
@@ -73,28 +169,21 @@ docker compose run --rm downloader add --allow-duplicate "https://youtube.com/wa
 docker compose run --rm downloader status
 docker compose run --rm downloader retry 12
 docker compose run --rm downloader skip 12 --reason "video unavailable"
+docker compose run --rm downloader clear-history --yes
 ```
 
-`add` and `retry` process their target job immediately by default. Use `--queue-only` if you want to stage work for a later manual run:
+`add` and `retry` process their target job immediately by default. Use `--queue-only` to stage work for a later manual run:
 
 ```bash
 docker compose run --rm downloader add --queue-only "https://youtube.com/watch?v=..."
 docker compose run --rm downloader run-once
 ```
 
-Normal `add` deduplicates by normalized URL. `add --allow-duplicate` creates a separate job for the same URL and stores its output under `/music/Duplicates/<job-id>/`.
+Most users should prefer `./bin/media-dl ...` from the host. Use the container CLI only when debugging the image entrypoint or bypassing the service API.
 
 ## Runtime API
 
-The service starts with `media-dl serve`, which runs the localhost web dashboard and API on the same Compose port. Downloads happen only when a CLI command, web action, or API request asks for work.
-
-Open the dashboard:
-
-```bash
-xdg-open http://127.0.0.1:8765
-```
-
-The dashboard can submit URLs, import queue files, manually run one queued job, retry, skip, and refresh recent job state. The left-side audio format control persists to `/state/runtime-settings.json` and supports `m4a`, `mp3`, `flac`, `opus`, and `wav`. The "Allow duplicate redownload" toggle maps to `allow_duplicate`; leave it off to dedupe by normalized URL, or turn it on to create a separate tracked duplicate job.
+Useful endpoints:
 
 ```bash
 curl http://127.0.0.1:8765/api/health
@@ -103,10 +192,28 @@ curl http://127.0.0.1:8765/api/jobs
 curl http://127.0.0.1:8765/api/settings
 ```
 
+Job and operation endpoints include:
+
+```text
+POST /api/jobs
+POST /api/jobs/{job_id}/retry
+POST /api/jobs/{job_id}/skip
+POST /api/run
+POST /api/import-queue
+POST /api/jobs/clear-history
+```
+
+## Troubleshooting
+
+- **State survived `docker compose down -v`:** this project uses bind-mounted host folders, so Docker does not delete `./state`, `./downloads`, or `./music`.
+- **Service unavailable:** check `docker compose ps` and `curl http://localhost:SERVICE_PORT/api/health`.
+- **YouTube URL is skipped after clearing jobs manually:** use dashboard `Clear history` or remove `/state/yt-dlp.archive`.
+- **Files downloaded but Navidrome does not show them yet:** wait for or trigger a Navidrome library scan.
+- **Default artwork warning:** ensure `/config/default.jpg` exists and is a JPG or PNG when thumbnail mode is set to default artwork.
+
 ## Notes
 
 - Use this only for media you are allowed to download and store.
-- Spotify is not downloaded directly from Spotify.
+- Spotify is not downloaded directly from Spotify; `spotDL` uses Spotify metadata and downloads matched audio from YouTube/YouTube Music.
 - The image includes Deno plus `yt-dlp[default]` because current YouTube extraction needs an external JavaScript runtime and EJS challenge solver support.
-- `yt-dlp` also maintains `/state/yt-dlp.archive` so rerunning changed playlists skips items already downloaded.
 - Navidrome does not write metadata to music files. This downloader writes tagged files before Navidrome scans them.

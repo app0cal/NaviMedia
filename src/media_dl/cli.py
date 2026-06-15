@@ -1,3 +1,5 @@
+"""Expose the container-internal command-line interface for job operations."""
+
 from __future__ import annotations
 
 import argparse
@@ -5,8 +7,10 @@ import sys
 
 from media_dl.config import load_config
 from media_dl.jobs import (
+    ClearHistoryBlockedError,
     UnsupportedUrlError,
     add_url,
+    clear_history,
     import_queue_files,
     list_recent_jobs,
     retry_job,
@@ -17,6 +21,7 @@ from media_dl.worker import watch
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse CLI arguments and dispatch to shared job/service functions."""
     parser = argparse.ArgumentParser(prog="media-dl")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -52,6 +57,13 @@ def main(argv: list[str] | None = None) -> int:
     skip = sub.add_parser("skip", help="mark a bad job as skipped")
     skip.add_argument("job_id", type=int)
     skip.add_argument("--reason", default="manually skipped")
+
+    clear = sub.add_parser("clear-history", help="clear job history and YouTube archive")
+    clear.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm clearing job history and the yt-dlp archive",
+    )
 
     sub.add_parser("watch", help="poll queue files and process jobs")
     sub.add_parser("serve", help="serve localhost API")
@@ -131,6 +143,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "skip":
         job = skip_job(config, args.job_id, args.reason)
         print(f"skipped: job {job.id}")
+        return 0
+
+    if args.command == "clear-history":
+        if not args.yes:
+            print(
+                "refusing to clear history without --yes; music files and settings are kept",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            result = clear_history(config)
+        except ClearHistoryBlockedError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        archive = "removed" if result.archive_deleted else "not present"
+        print(f"cleared {result.deleted_jobs} job(s); yt-dlp archive {archive}")
         return 0
 
     parser.error(f"unknown command {args.command}")

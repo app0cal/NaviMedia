@@ -1,3 +1,5 @@
+"""Load environment-backed runtime paths and binary names for the downloader service."""
+
 from __future__ import annotations
 
 import os
@@ -7,6 +9,8 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Config:
+    """Collect filesystem mounts, service settings, and downloader binary names."""
+
     music_root: Path
     state_dir: Path
     queue_dir: Path
@@ -22,25 +26,31 @@ class Config:
 
     @property
     def db_path(self) -> Path:
+        """Return the SQLite database path under the state mount."""
         return self.state_dir / "media-dl.sqlite"
 
     @property
     def yt_archive_path(self) -> Path:
+        """Return the yt-dlp archive file used to avoid repeated YouTube downloads."""
         return self.state_dir / "yt-dlp.archive"
 
     @property
     def tmp_dir(self) -> Path:
+        """Return the temporary download directory."""
         return self.download_dir / "tmp"
 
     @property
     def resolved_config_dir(self) -> Path:
+        """Return the explicit config mount or fall back to the state directory."""
         return self.config_dir or self.state_dir
 
     @property
     def resolved_default_thumbnail_path(self) -> Path:
+        """Return the configured default artwork path."""
         return self.default_thumbnail_path or (self.resolved_config_dir / "default.jpg")
 
     def ensure_dirs(self) -> None:
+        """Create all mounted and derived directories needed at runtime."""
         for path in (
             self.music_root,
             self.state_dir,
@@ -48,13 +58,12 @@ class Config:
             self.download_dir,
             self.resolved_config_dir,
             self.tmp_dir,
-            self.music_root / "YouTube",
-            self.music_root / "Spotify",
         ):
             path.mkdir(parents=True, exist_ok=True)
 
 
 def load_config() -> Config:
+    """Build a Config from environment variables with Docker-friendly defaults."""
     return Config(
         music_root=Path(os.getenv("MUSIC_ROOT", "./music")).resolve(),
         state_dir=Path(os.getenv("STATE_DIR", "./state")).resolve(),

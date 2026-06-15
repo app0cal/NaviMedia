@@ -1,0 +1,68 @@
+/* Active slate theme. Rename another styles.*.css file to styles.css to test it. */
+
+@import "./styles.base.css";
+
+:root {
+  --page-bg: #d9e1ec;
+  --body-bg: linear-gradient(180deg, #cfd8e6 0%, #e3e9f1 45%, #d9e1ec 100%);
+  --sidebar-bg: #f8fafc;
+  --panel-bg: #f8fafc;
+  --heading: #111827;
+  --text: #172033;
+  --muted: #475569;
+  --label: #334155;
+  --brand: #111827;
+  --border: #b8c4d6;
+  --shadow: 0 10px 28px rgb(15 23 42 / 0.12);
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-strong: #1d4ed8;
+  --accent-soft: #dbeafe;
+  --accent-soft-border: #bfdbfe;
+  --focus-ring: rgb(37 99 235 / 0.16);
+  --input-bg: #eef3f8;
+  --input-border: #aebbd0;
+  --button-bg: #f1f5f9;
+  --button-bg-hover: #e2e8f0;
+  --button-border: #aebbd0;
+  --button-border-hover: #7f8ea7;
+  --button-text: #1e293b;
+  --primary-text: #ffffff;
+  --switch-bg: #cbd5e1;
+  --switch-knob: #ffffff;
+  --hint-bg: #e2e8f0;
+  --hint-text: #334155;
+  --info-button-bg: #edf4ff;
+  --info-button-border: #b7c7e5;
+  --info-button-text: #1d4ed8;
+  --tooltip-bg: #111827;
+  --tooltip-border: #1f2937;
+  --tooltip-text: #f8fafc;
+  --tooltip-shadow: 0 14px 30px rgb(15 23 42 / 0.25);
+  --table-head-bg: #e9eef5;
+  --table-heading: #475569;
+  --table-border: #edf2f7;
+  --empty-bg: #eef3f8;
+  --empty-border: #94a3b8;
+  --status-bg: #e2e8f0;
+  --status-text: #475569;
+  --queued-bg: #fef3c7;
+  --queued-text: #92400e;
+  --success-bg: #dcfce7;
+  --success-border: #86efac;
+  --success-text: #166534;
+  --danger-bg: #fff1f2;
+  --danger-hover: #ffe4e6;
+  --danger-border: #fecaca;
+  --danger-text: #991b1b;
+  --danger-link: #dc2626;
+  --warning-text: #92400e;
+  --info-bg: #dbeafe;
+  --info-border: #93c5fd;
+  --info-text: #1d4ed8;
+  --link: #2563eb;
+  --youtube-bg: #fee2e2;
+  --youtube-text: #991b1b;
+  --spotify-bg: #dcfce7;
+  --spotify-text: #166534;
+}

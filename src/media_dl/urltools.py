@@ -1,3 +1,5 @@
+"""Classify supported media URLs and normalize them for dedupe."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,6 +8,8 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 
 class Source(StrEnum):
+    """Name the media sources the system can route to downloaders."""
+
     YOUTUBE = "youtube"
     SPOTIFY = "spotify"
     UNKNOWN = "unknown"
@@ -13,6 +17,8 @@ class Source(StrEnum):
 
 @dataclass(frozen=True)
 class ClassifiedUrl:
+    """Carry the raw URL, normalized URL, and detected source together."""
+
     raw_url: str
     normalized_url: str
     source: Source
@@ -33,6 +39,7 @@ SPOTIFY_HOSTS = {
 
 
 def classify_url(raw_url: str) -> ClassifiedUrl:
+    """Return the source classification and normalized form for a submitted URL."""
     stripped = raw_url.strip()
     normalized = normalize_url(stripped)
     host = urlparse(normalized).netloc.lower()
@@ -48,6 +55,7 @@ def classify_url(raw_url: str) -> ClassifiedUrl:
 
 
 def normalize_url(raw_url: str) -> str:
+    """Normalize URL casing, tracking parameters, sorting, and path suffixes."""
     parsed = urlparse(raw_url.strip())
     scheme = parsed.scheme.lower() or "https"
     host = parsed.netloc.lower()
@@ -65,6 +73,7 @@ def normalize_url(raw_url: str) -> str:
 
 
 def _normalize_path(path: str) -> str:
+    """Trim trailing slashes except for the root path."""
     if path != "/" and path.endswith("/"):
         return path.rstrip("/")
     return path

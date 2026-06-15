@@ -1,3 +1,5 @@
+"""Normalize audio tags so downloaded files index cleanly in Navidrome."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -10,16 +12,30 @@ SUPPORTED_METADATA_SUFFIXES = {".flac", ".m4a", ".mp3", ".ogg", ".opus"}
 
 
 class EasyAudio(Protocol):
-    def get(self, key: str, default=None): ...
-    def __setitem__(self, key: str, value) -> None: ...
-    def __delitem__(self, key: str) -> None: ...
-    def save(self) -> None: ...
+    """Describe the mutagen easy-tag operations used by cleanup."""
+
+    def get(self, key: str, default=None):
+        """Return tag values for one key."""
+        ...
+
+    def __setitem__(self, key: str, value) -> None:
+        """Set tag values for one key."""
+        ...
+
+    def __delitem__(self, key: str) -> None:
+        """Delete tag values for one key."""
+        ...
+
+    def save(self) -> None:
+        """Persist tag changes to disk."""
+        ...
 
 
 def clean_new_audio_metadata(
     paths: list[Path],
     policy: MetadataPolicy,
 ) -> str | None:
+    """Clean metadata on new files and return a warning if any file fails."""
     if policy.mode != METADATA_MODE_NAVIDROME_CLEAN:
         return None
 
@@ -36,6 +52,7 @@ def clean_new_audio_metadata(
 
 
 def clean_audio_metadata(path: Path, policy: MetadataPolicy) -> None:
+    """Apply Navidrome-friendly title, artist, album artist, and album fallbacks."""
     audio = _open_audio(path)
     changed = False
 
@@ -61,6 +78,7 @@ def clean_audio_metadata(path: Path, policy: MetadataPolicy) -> None:
 
 
 def _open_audio(path: Path) -> EasyAudio:
+    """Open an audio file with a mutagen easy-tag interface for its suffix."""
     suffix = path.suffix.lower()
     if suffix == ".mp3":
         return _open_mp3(path)
@@ -86,6 +104,7 @@ def _open_audio(path: Path) -> EasyAudio:
 
 
 def _open_mp3(path: Path) -> EasyAudio:
+    """Open MP3 tags, creating an ID3 header when the file has none."""
     from mutagen.easyid3 import EasyID3
     from mutagen.id3 import ID3, ID3NoHeaderError
 
@@ -97,6 +116,7 @@ def _open_mp3(path: Path) -> EasyAudio:
 
 
 def _values(audio: EasyAudio, key: str) -> list[str]:
+    """Return non-empty string tag values for one easy-tag key."""
     raw = audio.get(key, [])
     if raw is None:
         return []
@@ -108,6 +128,7 @@ def _values(audio: EasyAudio, key: str) -> list[str]:
 
 
 def _delete_if_present(audio: EasyAudio, key: str) -> bool:
+    """Delete a tag key when present and report whether anything changed."""
     try:
         del audio[key]  # type: ignore[index]
     except KeyError:
