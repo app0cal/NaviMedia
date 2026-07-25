@@ -3,7 +3,7 @@
 from media_dl.config import Config
 from media_dl.db import Database
 from media_dl.downloader import DownloadResult
-from media_dl.playlist import PlaylistItems
+from media_dl.playlist import PlaylistEntry, PlaylistItems
 from media_dl.urltools import Source
 from media_dl.worker import process_job, run_once
 from media_dl.runtime_settings import save_runtime_settings
@@ -356,3 +356,59 @@ def test_run_once_counts_parent_expansion_as_one_job(tmp_path, monkeypatch):
     assert processed_count == 1
     assert queued is not None
     assert queued.normalized_url == "https://www.youtube.com/watch?v=abc"
+
+
+def test_tracked_playlist_queues_canonical_item_downloads(tmp_path, monkeypatch):
+    """Verify tracked playlists itemize current songs and persist child work."""
+    cfg = Config(
+        music_root=tmp_path / "music",
+        state_dir=tmp_path / "state",
+        queue_dir=tmp_path / "queue",
+        download_dir=tmp_path / "downloads",
+    )
+    db = Database(cfg.db_path)
+    job, _ = db.add_job(
+        Source.YOUTUBE,
+        "https://youtube.com/playlist?list=PL123",
+        "https://youtube.com/playlist?list=PL123",
+    )
+    playlist = db.ensure_playlist(job, tracked=True, interval_seconds=86400)
+    db.close()
+    monkeypatch.setattr(
+        "media_dl.worker.extract_youtube_playlist_items",
+        lambda _bin, _url: PlaylistItems(
+            urls=["https://www.youtube.com/watch?v=abc"],
+            error_count=0,
+            title="Mix",
+            entries=[
+                PlaylistEntry(
+                    source=Source.YOUTUBE,
+                    provider_id="abc",
+                    url="https://www.youtube.com/watch?v=abc",
+                    title="Song",
+                    artist="Artist",
+                    position=1,
+                )
+            ],
+        ),
+    )
+
+    processed = process_job(cfg, job.id)
+
+    db = Database(cfg.db_path)
+    children = [
+        child for child in db.list_jobs(limit=10) if child.parent_id == job.id
+    ]
+    items, total = db.list_playlist_items(playlist.id)
+    pending_work = db.conn.execute(
+        "SELECT COUNT(*) AS total FROM work_items WHERE status = 'pending'"
+    ).fetchone()["total"]
+    scheduled = db.get_playlist(playlist.id)
+    db.close()
+    assert processed.status == "complete"
+    assert len(children) == 1
+    assert children[0].media_item_id == items[0].id
+    assert total == 1
+    assert items[0].title == "Song"
+    assert pending_work == 1
+    assert scheduled.next_check_at is not None

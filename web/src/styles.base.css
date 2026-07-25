@@ -236,7 +236,7 @@ select:disabled {
   font-family: var(--mono-font);
   font-size: 13px;
   font-weight: 760;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 
 .submit-row {
@@ -245,7 +245,9 @@ select:disabled {
 
 .submit-row input,
 .submit-row select,
-.format-form > select {
+.format-form select,
+.schedule-field select,
+.compact-select {
   width: 100%;
   min-width: 0;
   border: 1px solid var(--input-border);
@@ -271,7 +273,9 @@ select:disabled {
 
 .submit-row input:focus,
 .submit-row select:focus,
-.format-form > select:focus {
+.format-form select:focus,
+.schedule-field select:focus,
+.compact-select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--focus-ring);
 }
@@ -283,7 +287,7 @@ select:disabled {
   font-family: var(--mono-font);
   font-size: 14px;
   font-weight: 780;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
   white-space: nowrap;
 }
 
@@ -479,6 +483,44 @@ select:disabled {
   margin-top: 12px;
 }
 
+.schedule-field {
+  width: min(360px, 100%);
+  margin-top: 14px;
+}
+
+.schedule-field select,
+.format-form select {
+  width: 100%;
+}
+
+.interval-editor {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) minmax(72px, 0.55fr) minmax(90px, 0.65fr);
+  gap: 8px;
+}
+
+.interval-editor > select:first-child:last-child {
+  grid-column: 1 / -1;
+}
+
+.interval-editor input {
+  min-width: 0;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: var(--text);
+  background: var(--input-bg);
+}
+
+.interval-editor.compact {
+  min-width: 310px;
+  grid-template-columns: 110px 70px 90px;
+}
+
+.settings-save {
+  margin-top: 18px;
+}
+
 .table-wrap {
   width: 100%;
   overflow-x: auto;
@@ -528,7 +570,7 @@ td {
   font-family: var(--mono-font);
   font-size: 12px;
   font-weight: 820;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 
 .status.queued,
@@ -602,6 +644,71 @@ td {
 
 .link-button.danger {
   color: var(--danger-link);
+}
+
+.expand-button {
+  display: inline-flex;
+  max-width: 360px;
+  align-items: flex-start;
+  gap: 7px;
+  border: 0;
+  padding: 0;
+  color: var(--link);
+  background: transparent;
+  font: inherit;
+  font-weight: 760;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.tracked-table {
+  min-width: 1040px;
+}
+
+.compact-select {
+  min-width: 110px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  color: var(--text);
+  background: var(--input-bg);
+}
+
+.item-expansion-row > td {
+  padding: 0;
+  background: var(--empty-bg);
+}
+
+.playlist-items {
+  display: grid;
+  width: 100%;
+}
+
+.playlist-item {
+  display: grid;
+  min-width: 760px;
+  grid-template-columns: 52px minmax(180px, 1.4fr) minmax(150px, 1fr) 110px minmax(120px, 0.8fr);
+  gap: 12px;
+  border-top: 1px solid var(--table-border);
+  padding: 9px 12px;
+  color: var(--label);
+  font-size: 13px;
+}
+
+.playlist-item.heading {
+  border-top: 0;
+  color: var(--table-heading);
+  background: var(--table-head-bg);
+  font-family: var(--mono-font);
+  font-size: 11px;
+  font-weight: 820;
+  text-transform: uppercase;
+}
+
+.empty-state.compact {
+  border: 0;
+  border-radius: 0;
+  padding: 18px;
 }
 
 .empty-state {
@@ -716,7 +823,8 @@ td {
 
   .submit-row input,
   .submit-row select,
-  .format-form > select,
+  .format-form select,
+  .schedule-field select,
   .button {
     width: 100%;
     max-width: 100%;

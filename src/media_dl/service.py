@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from media_dl import __version__
 from media_dl.config import Config, load_config
-from media_dl.db import Job
+from media_dl.db import Database, Job, Playlist, PlaylistItem
 from media_dl.download_plan import (
     ALLOWED_METADATA_MODES,
     ALLOWED_OUTPUT_LAYOUTS,
@@ -29,15 +29,17 @@ from media_dl.jobs import (
     import_queue_files,
     list_recent_jobs,
     retry_job,
-    run_queued_jobs,
     skip_job,
 )
+from media_dl.events import EventBroker
+from media_dl.playlist import is_playlist_url
 from media_dl.runtime_settings import (
     ALLOWED_AUDIO_FORMATS,
     ALLOWED_THUMBNAIL_MODES,
     load_runtime_settings,
     save_runtime_settings,
 )
+from media_dl.service_runtime import ServiceRuntime
 
 
 WEB_DIST_DIR = Path(__file__).with_name("static")
@@ -63,6 +65,9 @@ class JobResponse(BaseModel):
     child_created_count: int
     child_duplicate_count: int
     child_error_count: int
+    playlist_id: int | None
+    media_item_id: int | None
+    job_kind: str
 
 
 class AddJobRequest(BaseModel):
@@ -71,6 +76,8 @@ class AddJobRequest(BaseModel):
     url: str
     queue_only: bool = False
     allow_duplicate: bool = False
+    track_playlist: bool = False
+    interval_seconds: int = Field(default=604800, ge=3600, le=31536000)
 
 
 class RetryJobRequest(BaseModel):
@@ -97,6 +104,7 @@ class AddJobResponse(BaseModel):
     job: JobResponse
     created: bool
     processed: JobResponse | None
+    accepted: bool = False
 
 
 class JobActionResponse(BaseModel):
@@ -104,6 +112,7 @@ class JobActionResponse(BaseModel):
 
     job: JobResponse
     processed: JobResponse | None = None
+    accepted: bool = False
 
 
 class JobListResponse(BaseModel):
@@ -117,9 +126,9 @@ class JobListResponse(BaseModel):
 
 
 class RunJobsResponse(BaseModel):
-    """Return how many queued jobs a manual run processed."""
+    """Return how many staged jobs were accepted for background work."""
 
-    processed: int
+    queued: int
 
 
 class ClearHistoryResponse(BaseModel):
@@ -172,10 +181,89 @@ class UpdateRuntimeSettingsRequest(BaseModel):
     playlist_mode: str | None = None
 
 
+class PlaylistResponse(BaseModel):
+    """Serialize playlist inventory and tracking state."""
+
+    id: int
+    source: str
+    raw_url: str
+    normalized_url: str
+    title: str | None
+    job_id: int | None
+    tracked: bool
+    paused: bool
+    interval_seconds: int
+    last_checked_at: str | None
+    last_success_at: str | None
+    next_check_at: str | None
+    last_error: str | None
+
+
+class PlaylistItemResponse(BaseModel):
+    """Serialize one playlist membership and canonical download state."""
+
+    id: int
+    playlist_id: int
+    source: str
+    provider_id: str
+    url: str
+    title: str
+    artist: str
+    position: int
+    active: bool
+    download_status: str
+    output_path: str | None
+    last_error: str | None
+    download_job_id: int | None
+
+
+class PlaylistListResponse(BaseModel):
+    """Return tracked playlists."""
+
+    playlists: list[PlaylistResponse]
+
+
+class PlaylistItemsResponse(BaseModel):
+    """Return one paginated playlist item page."""
+
+    items: list[PlaylistItemResponse]
+    limit: int
+    offset: int
+    total: int
+    has_more: bool
+
+
+class UpdatePlaylistRequest(BaseModel):
+    """Accept schedule and tracking control changes."""
+
+    tracked: bool | None = None
+    paused: bool | None = None
+    interval_seconds: int | None = Field(default=None, ge=3600, le=31536000)
+
+
 def create_app(config: Config | None = None) -> FastAPI:
     """Create the FastAPI app with API routes and static dashboard fallback."""
     cfg = config or load_config()
-    app = FastAPI(title="Navidrome Media Downloader", version=__version__)
+    broker = EventBroker()
+    runtime_worker = ServiceRuntime(cfg, broker)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        """Start and stop the single background runtime with the API service."""
+        cfg.ensure_dirs()
+        runtime_worker.start()
+        try:
+            yield
+        finally:
+            runtime_worker.stop()
+
+    app = FastAPI(
+        title="Navidrome Media Downloader",
+        version=__version__,
+        lifespan=lifespan,
+    )
+    app.state.runtime = runtime_worker
+    app.state.events = broker
     assets_dir = WEB_DIST_DIR / "assets"
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
@@ -271,34 +359,77 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.post("/api/jobs", response_model=AddJobResponse)
     def create_job(request: AddJobRequest) -> AddJobResponse:
-        """Create or refresh a job and optionally process it immediately."""
+        """Create or refresh a job and optionally queue background processing."""
+        if request.track_playlist and request.queue_only:
+            raise HTTPException(
+                status_code=400,
+                detail="tracked playlists cannot be submitted as queue only",
+            )
+        if request.track_playlist and request.allow_duplicate:
+            raise HTTPException(
+                status_code=400,
+                detail="tracked playlists cannot be forced duplicates",
+            )
+        if request.track_playlist and not is_playlist_url(request.url):
+            raise HTTPException(
+                status_code=400,
+                detail="tracking is only available for playlist URLs",
+            )
+        if request.interval_seconds % 3600:
+            raise HTTPException(
+                status_code=400,
+                detail="playlist intervals must use whole hours",
+            )
         try:
             result = add_url(
                 cfg,
                 request.url,
-                queue_only=request.queue_only,
+                queue_only=True,
                 allow_duplicate=request.allow_duplicate,
             )
         except UnsupportedUrlError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        if is_playlist_url(result.job.normalized_url):
+            db = Database(cfg.db_path)
+            try:
+                db.ensure_playlist(
+                    result.job,
+                    tracked=request.track_playlist,
+                    interval_seconds=request.interval_seconds,
+                )
+                if request.track_playlist and result.job.status not in {"queued", "retry"}:
+                    db.retry(result.job.id)
+            finally:
+                db.close()
+
+        accepted = False
+        refreshed = _get_job(cfg, result.job.id)
+        if not request.queue_only and refreshed.status in {"queued", "retry"}:
+            accepted = runtime_worker.enqueue_job(result.job.id)
+
         return AddJobResponse(
-            job=_job_response(result.job),
+            job=_job_response(refreshed),
             created=result.created,
-            processed=_job_response(result.processed) if result.processed else None,
+            processed=None,
+            accepted=accepted,
         )
 
     @app.post("/api/jobs/{job_id}/retry", response_model=JobActionResponse)
     def retry(job_id: int, request: RetryJobRequest) -> JobActionResponse:
-        """Mark a job for retry and optionally process it immediately."""
+        """Mark a job for retry and optionally queue it for background work."""
         try:
-            result = retry_job(cfg, job_id, queue_only=request.queue_only)
+            result = retry_job(cfg, job_id, queue_only=True)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+        accepted = False
+        if not request.queue_only:
+            accepted = runtime_worker.enqueue_job(job_id)
         return JobActionResponse(
             job=_job_response(result.job),
-            processed=_job_response(result.processed) if result.processed else None,
+            processed=None,
+            accepted=accepted,
         )
 
     @app.post("/api/jobs/{job_id}/skip", response_model=JobActionResponse)
@@ -313,8 +444,10 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.post("/api/run", response_model=RunJobsResponse)
     def run_jobs(request: RunJobsRequest) -> RunJobsResponse:
-        """Process a bounded number of queued jobs."""
-        return RunJobsResponse(processed=run_queued_jobs(cfg, max_jobs=request.max_jobs))
+        """Queue a bounded number of staged jobs for background processing."""
+        return RunJobsResponse(
+            queued=runtime_worker.enqueue_queued_jobs(request.max_jobs)
+        )
 
     @app.post("/api/jobs/clear-history", response_model=ClearHistoryResponse)
     def clear_job_history() -> ClearHistoryResponse:
@@ -333,6 +466,104 @@ def create_app(config: Config | None = None) -> FastAPI:
         """Import standard queue files into jobs without processing them."""
         return _queue_import_response(import_queue_files(cfg))
 
+    @app.get("/api/playlists/tracked", response_model=PlaylistListResponse)
+    def tracked_playlists() -> PlaylistListResponse:
+        """Return pinned tracked-playlist definitions."""
+        db = Database(cfg.db_path)
+        try:
+            playlists = db.list_tracked_playlists()
+        finally:
+            db.close()
+        return PlaylistListResponse(
+            playlists=[_playlist_response(playlist) for playlist in playlists]
+        )
+
+    @app.get(
+        "/api/playlists/{playlist_id}/items",
+        response_model=PlaylistItemsResponse,
+    )
+    def playlist_items(
+        playlist_id: int,
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> PlaylistItemsResponse:
+        """Return ordered current and removed membership for one playlist."""
+        db = Database(cfg.db_path)
+        try:
+            try:
+                items, total = db.list_playlist_items(
+                    playlist_id, limit=limit, offset=offset
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        finally:
+            db.close()
+        return PlaylistItemsResponse(
+            items=[_playlist_item_response(item) for item in items],
+            limit=limit,
+            offset=offset,
+            total=total,
+            has_more=offset + len(items) < total,
+        )
+
+    @app.patch("/api/playlists/{playlist_id}", response_model=PlaylistResponse)
+    def update_playlist(
+        playlist_id: int,
+        request: UpdatePlaylistRequest,
+    ) -> PlaylistResponse:
+        """Update a playlist schedule, pause state, or tracking state."""
+        if (
+            request.interval_seconds is not None
+            and request.interval_seconds % 3600
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="playlist intervals must use whole hours",
+            )
+        db = Database(cfg.db_path)
+        try:
+            try:
+                playlist = db.update_playlist_tracking(
+                    playlist_id,
+                    tracked=request.tracked,
+                    paused=request.paused,
+                    interval_seconds=request.interval_seconds,
+                )
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+        finally:
+            db.close()
+        broker.publish("playlist", playlist_id=playlist_id)
+        if playlist.tracked and not playlist.paused and playlist.next_check_at:
+            runtime_worker.wake()
+        return _playlist_response(playlist)
+
+    @app.post("/api/playlists/{playlist_id}/check", response_model=JobActionResponse)
+    def check_playlist(playlist_id: int) -> JobActionResponse:
+        """Queue an immediate playlist inventory check."""
+        try:
+            job_id, accepted = runtime_worker.queue_playlist_check(playlist_id)
+            job = _get_job(cfg, job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return JobActionResponse(
+            job=_job_response(job),
+            processed=None,
+            accepted=accepted,
+        )
+
+    @app.get("/api/events")
+    def events() -> StreamingResponse:
+        """Stream change notifications for dashboard REST refreshes."""
+        return StreamingResponse(
+            broker.stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     @app.get("/")
     def web_index() -> FileResponse:
         """Serve the dashboard entrypoint."""
@@ -344,11 +575,6 @@ def create_app(config: Config | None = None) -> FastAPI:
         if full_path == "api" or full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not Found")
         return _web_index_response()
-
-    @app.on_event("startup")
-    def startup() -> None:
-        """Create required runtime directories when the service starts."""
-        cfg.ensure_dirs()
 
     return app
 
@@ -390,7 +616,57 @@ def _job_response(job: Job) -> JobResponse:
         child_created_count=job.child_created_count,
         child_duplicate_count=job.child_duplicate_count,
         child_error_count=job.child_error_count,
+        playlist_id=job.playlist_id,
+        media_item_id=job.media_item_id,
+        job_kind=job.job_kind,
     )
+
+
+def _playlist_response(playlist: Playlist) -> PlaylistResponse:
+    """Convert a Playlist dataclass into its API response model."""
+    return PlaylistResponse(
+        id=playlist.id,
+        source=playlist.source.value,
+        raw_url=playlist.raw_url,
+        normalized_url=playlist.normalized_url,
+        title=playlist.title,
+        job_id=playlist.job_id,
+        tracked=playlist.tracked,
+        paused=playlist.paused,
+        interval_seconds=playlist.interval_seconds,
+        last_checked_at=playlist.last_checked_at,
+        last_success_at=playlist.last_success_at,
+        next_check_at=playlist.next_check_at,
+        last_error=playlist.last_error,
+    )
+
+
+def _playlist_item_response(item: PlaylistItem) -> PlaylistItemResponse:
+    """Convert a PlaylistItem dataclass into its API response model."""
+    return PlaylistItemResponse(
+        id=item.id,
+        playlist_id=item.playlist_id,
+        source=item.source.value,
+        provider_id=item.provider_id,
+        url=item.url,
+        title=item.title,
+        artist=item.artist,
+        position=item.position,
+        active=item.active,
+        download_status=item.download_status,
+        output_path=item.output_path,
+        last_error=item.last_error,
+        download_job_id=item.download_job_id,
+    )
+
+
+def _get_job(config: Config, job_id: int) -> Job:
+    """Fetch one job through a short-lived service database connection."""
+    db = Database(config.db_path)
+    try:
+        return db.get_job(job_id)
+    finally:
+        db.close()
 
 
 def _queue_import_response(

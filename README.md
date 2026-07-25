@@ -1,7 +1,7 @@
 # Navidrome Media Downloader
 Media downloader for installing audio from YouTube, YouTube Music, and Spotify links with the primary design for writing metadata for Navidrome.
 
-The project was created to supplement the issue of getting all the main audio files for Navidrome for homelabs. Host users should not need to install `yt-dlp`, `spotDL`, `ffmpeg`, Deno, or Python dependencies directly. The container serves a localhost-only API and the bundled web dashboard, and downloads happen only when a CLI command, API request, or dashboard action asks for work.
+The project was created to supplement the issue of getting all the main audio files for Navidrome for homelabs. Host users should not need to install `yt-dlp`, `spotDL`, `ffmpeg`, Deno, or Python dependencies directly. The container serves a localhost-only API and the bundled web dashboard. Downloads are handled sequentially by one background worker after a CLI/API/dashboard request or a due tracked-playlist check.
 
 WARNING: for those who are hosting this on a homelab do NOT expose this service. Simple security logins will be added for the next update, but this is intended to be on a local computer only (ngl i mostly made this shit for myself). 
 
@@ -50,10 +50,13 @@ Optionally point Compose at your existing Navidrome music folder:
 ```bash
 cp .env.example .env
 # edit .env so NAVIDROME_MUSIC_ROOT points at your real Navidrome music folder
+# set PUID and PGID to the output of `id -u` and `id -g`
 ./bin/media-dl up
 ```
 
 Navidrome should mount the same host folder as its music library. The downloader also mounts `${NAVIMEDIA_CONFIG:-./config}` at `/config`; place `default.jpg` there if you use default artwork mode.
+Compose runs the downloader as `${PUID:-1000}:${PGID:-1000}` so files created
+through bind mounts remain manageable by the host account.
 
 Use `./bin/media-dl rebuild` when you want the same behavior as `docker compose up -d --build`.
 
@@ -107,6 +110,10 @@ Open:
 The dashboard supports:
 
 - Submit YouTube, YouTube Music, and Spotify URLs.
+- Track public or unlisted playlists on daily, weekly, 30-day, or custom schedules.
+- Run, pause, resume, reschedule, or stop tracked playlists.
+- Expand playlist rows to inspect the latest title, artist, membership, and download state.
+- Receive live job and playlist updates through server-sent events without page reloads.
 - Queue-only submission for later manual runs.
 - Forced duplicate redownloads under `/music/Duplicates/<job-id>/`.
 - Paginated job history with parent/child playlist context.
@@ -126,7 +133,15 @@ Playlist handling is controlled by the dashboard setting `Playlist handling`.
 - `Download playlist as one job` keeps current single-job behavior.
 - `Expand playlist into queued items` currently applies to YouTube and YouTube Music playlists.
 
-When expansion is enabled, the parent playlist job extracts child video URLs with `yt-dlp --flat-playlist --dump-single-json`, creates one queued child job per new item, then completes as a summary row. Child jobs are processed later by manual runs or normal job actions. Spotify playlists still use single-job behavior.
+Every playlist submission records the latest source membership for the expandable dashboard view. YouTube inventory uses flat `yt-dlp` metadata and Spotify inventory uses spotDL metadata-only output.
+
+When expansion is enabled, a one-time YouTube playlist creates one queued child job per new item and completes as a summary row. Child jobs are processed later by manual runs or normal job actions. Untracked Spotify playlists retain single-job download behavior.
+
+Tracked YouTube and Spotify playlists always use item-level jobs, regardless of this setting. A tracked playlist downloads its current items on the initial check and later queues only new or previously failed items. Removed source items are marked as removed in the dashboard; local music is never deleted.
+
+Tracking defaults to once a week. Schedules are stored in UTC and calculated from the completion of the last check. `Run now` resets that interval. After downtime, the service queues one catch-up check for each overdue playlist rather than replaying every missed interval.
+
+Only public and unlisted playlists accessible without new provider credentials are supported.
 
 ## Clear History
 
@@ -142,6 +157,7 @@ It keeps:
 - Runtime settings under `/state/runtime-settings.json`.
 - Queue files under `/queue`.
 - Config files under `/config`.
+- Tracked playlist definitions, schedules, current membership, and known media state.
 
 This is the recommended way to get a fresh job history without deleting music.
 
@@ -201,7 +217,14 @@ POST /api/jobs/{job_id}/skip
 POST /api/run
 POST /api/import-queue
 POST /api/jobs/clear-history
+GET  /api/playlists/tracked
+GET  /api/playlists/{playlist_id}/items
+PATCH /api/playlists/{playlist_id}
+POST /api/playlists/{playlist_id}/check
+GET  /api/events
 ```
+
+Service job actions are asynchronous: successful responses report accepted/queued work, and the background worker updates job state afterward. `/api/events` is an SSE notification stream; REST responses remain the authoritative state and clients should refresh them after reconnecting.
 
 ## Troubleshooting
 
@@ -210,6 +233,11 @@ POST /api/jobs/clear-history
 - **YouTube URL is skipped after clearing jobs manually:** use dashboard `Clear history` or remove `/state/yt-dlp.archive`.
 - **Files downloaded but Navidrome does not show them yet:** wait for or trigger a Navidrome library scan.
 - **Default artwork warning:** ensure `/config/default.jpg` exists and is a JPG or PNG when thumbnail mode is set to default artwork.
+- **Tracked playlist stopped updating:** confirm it is not paused, inspect its last inventory error, and use `Run now` after provider connectivity returns.
+- **Live updates disconnected:** the dashboard reconnects automatically and reloads REST state; the explicit Refresh action remains available.
+- **Downloaded files cannot be deleted on the host:** set `PUID` and `PGID` in
+  `.env` to `id -u` and `id -g`, then repair older files with
+  `docker exec -u 0 navidrome-media-dl chown -R "$(id -u):$(id -g)" /music /state /queue /downloads /config`.
 
 ## Notes
 

@@ -299,8 +299,8 @@ def test_jobs_endpoint_rejects_unbounded_limit(tmp_path):
     assert response.status_code == 422
 
 
-def test_create_job_endpoint_creates_and_processes_job(tmp_path):
-    """Verify create-job endpoint processes immediately by default."""
+def test_create_job_endpoint_queues_background_work(tmp_path):
+    """Verify create-job returns promptly after accepting background work."""
     client = TestClient(create_app(config(tmp_path)))
 
     response = client.post("/api/jobs", json={"url": "https://youtube.com/watch?v=abc"})
@@ -309,8 +309,8 @@ def test_create_job_endpoint_creates_and_processes_job(tmp_path):
     data = response.json()
     assert data["created"] is True
     assert data["job"]["status"] == "queued"
-    assert data["processed"]["status"] == "failed"
-    assert data["processed"]["last_error"]
+    assert data["processed"] is None
+    assert data["accepted"] is True
 
 
 def test_create_job_endpoint_dedupes_by_default(tmp_path):
@@ -410,8 +410,8 @@ def test_skip_endpoint_marks_skipped_with_reason(tmp_path):
     assert data["processed"] is None
 
 
-def test_run_endpoint_processes_queued_jobs(tmp_path):
-    """Verify manual run endpoint processes one queued job."""
+def test_run_endpoint_queues_staged_jobs(tmp_path):
+    """Verify manual run accepts one staged job for background work."""
     client = TestClient(create_app(config(tmp_path)))
     client.post(
         "/api/jobs",
@@ -421,8 +421,96 @@ def test_run_endpoint_processes_queued_jobs(tmp_path):
     response = client.post("/api/run", json={"max_jobs": 1})
 
     assert response.status_code == 200
-    assert response.json() == {"processed": 1}
-    assert client.get("/api/jobs").json()["jobs"][0]["status"] == "failed"
+    assert response.json() == {"queued": 1}
+    assert client.get("/api/jobs").json()["jobs"][0]["status"] == "queued"
+
+
+def test_tracking_submission_and_controls(tmp_path):
+    """Verify tracked playlist submission, validation, listing, and controls."""
+    client = TestClient(create_app(config(tmp_path)))
+
+    rejected = client.post(
+        "/api/jobs",
+        json={
+            "url": "https://youtube.com/watch?v=abc",
+            "track_playlist": True,
+        },
+    )
+    assert rejected.status_code == 400
+
+    invalid_interval = client.post(
+        "/api/jobs",
+        json={
+            "url": "https://youtube.com/playlist?list=PL123",
+            "track_playlist": True,
+            "interval_seconds": 5400,
+        },
+    )
+    assert invalid_interval.status_code == 400
+
+    response = client.post(
+        "/api/jobs",
+        json={
+            "url": "https://youtube.com/playlist?list=PL123",
+            "track_playlist": True,
+            "interval_seconds": 86400,
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["accepted"] is True
+    playlist_id = response.json()["job"]["playlist_id"]
+
+    tracked = client.get("/api/playlists/tracked").json()["playlists"]
+    assert tracked[0]["id"] == playlist_id
+    assert tracked[0]["interval_seconds"] == 86400
+
+    paused = client.patch(
+        f"/api/playlists/{playlist_id}",
+        json={"paused": True, "interval_seconds": 172800},
+    )
+    assert paused.status_code == 200
+    assert paused.json()["paused"] is True
+    assert paused.json()["interval_seconds"] == 172800
+
+    run_now = client.post(f"/api/playlists/{playlist_id}/check")
+    assert run_now.status_code == 200
+    assert run_now.json()["accepted"] is False
+
+
+def test_playlist_items_endpoint_returns_inventory(tmp_path):
+    """Verify playlist item responses expose membership and download state."""
+    cfg = config(tmp_path)
+    db = Database(cfg.db_path)
+    job, _ = db.add_job(
+        Source.YOUTUBE,
+        "https://youtube.com/playlist?list=PL123",
+        "https://youtube.com/playlist?list=PL123",
+    )
+    playlist = db.ensure_playlist(job)
+    from media_dl.playlist import PlaylistEntry
+
+    db.reconcile_playlist_items(
+        playlist.id,
+        [
+            PlaylistEntry(
+                source=Source.YOUTUBE,
+                provider_id="abc",
+                url="https://www.youtube.com/watch?v=abc",
+                title="Song",
+                artist="Artist",
+                position=1,
+            )
+        ],
+    )
+    db.close()
+    client = TestClient(create_app(cfg))
+
+    response = client.get(f"/api/playlists/{playlist.id}/items")
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["title"] == "Song"
+    assert response.json()["items"][0]["artist"] == "Artist"
 
 
 def test_import_queue_endpoint_imports_queue_files(tmp_path):

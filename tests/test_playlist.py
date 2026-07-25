@@ -5,7 +5,10 @@ import json
 import pytest
 
 from media_dl.playlist import (
+    is_playlist_url,
+    is_spotify_playlist_url,
     is_youtube_playlist_url,
+    parse_spotify_playlist_json,
     parse_youtube_playlist_json,
 )
 
@@ -41,6 +44,8 @@ def test_parse_youtube_playlist_json_normalizes_video_urls():
         "https://www.youtube.com/watch?v=ghi",
     ]
     assert items.error_count == 2
+    assert items.entries[0].title == "Unknown title"
+    assert items.entries[0].provider_id == "abc"
 
 
 def test_parse_youtube_playlist_json_rejects_invalid_payload():
@@ -50,3 +55,52 @@ def test_parse_youtube_playlist_json_rejects_invalid_payload():
 
     with pytest.raises(ValueError, match="did not include entries"):
         parse_youtube_playlist_json("{}")
+
+
+def test_parse_youtube_playlist_metadata():
+    """Verify title and artist metadata are retained for the dashboard."""
+    items = parse_youtube_playlist_json(
+        json.dumps(
+            {
+                "title": "Mix",
+                "entries": [
+                    {
+                        "id": "abc",
+                        "title": "Track",
+                        "artist": "Artist",
+                        "uploader": "Fallback",
+                    }
+                ],
+            }
+        )
+    )
+
+    assert items.title == "Mix"
+    assert items.entries[0].title == "Track"
+    assert items.entries[0].artist == "Artist"
+
+
+def test_spotify_playlist_detection_and_metadata_parsing():
+    """Verify Spotify playlist URLs and spotDL save JSON normalize correctly."""
+    url = "https://open.spotify.com/playlist/list123"
+    assert is_spotify_playlist_url(url)
+    assert is_playlist_url(url)
+    assert not is_spotify_playlist_url("https://open.spotify.com/track/track123")
+
+    items = parse_spotify_playlist_json(
+        "log line\n"
+        + json.dumps(
+            [
+                {
+                    "song_id": "track123",
+                    "url": "https://open.spotify.com/track/track123",
+                    "name": "Song",
+                    "artists": ["First", "Second"],
+                }
+            ]
+        )
+    )
+
+    assert items.urls == ["https://open.spotify.com/track/track123"]
+    assert items.entries[0].provider_id == "track123"
+    assert items.entries[0].artist == "First, Second"

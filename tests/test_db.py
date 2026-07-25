@@ -339,3 +339,95 @@ def test_mark_expanded_persists_child_counts(tmp_path):
     assert expanded.last_warning == "Expanded playlist: 2 queued, 1 duplicates, 0 errors."
 
     db.close()
+
+
+def test_playlist_reconciliation_tracks_shared_and_removed_items(tmp_path):
+    """Verify canonical items can be shared and membership removal is non-destructive."""
+    from media_dl.playlist import PlaylistEntry
+
+    db = Database(tmp_path / "state.sqlite")
+    first_job, _ = db.add_job(
+        Source.YOUTUBE,
+        "https://youtube.com/playlist?list=one",
+        "https://youtube.com/playlist?list=one",
+    )
+    second_job, _ = db.add_job(
+        Source.YOUTUBE,
+        "https://youtube.com/playlist?list=two",
+        "https://youtube.com/playlist?list=two",
+    )
+    first = db.ensure_playlist(first_job)
+    second = db.ensure_playlist(second_job)
+    entry = PlaylistEntry(
+        source=Source.YOUTUBE,
+        provider_id="abc",
+        url="https://www.youtube.com/watch?v=abc",
+        title="Song",
+        artist="Artist",
+        position=1,
+    )
+
+    db.reconcile_playlist_items(first.id, [entry])
+    db.reconcile_playlist_items(second.id, [entry])
+    first_items, _ = db.list_playlist_items(first.id)
+    second_items, _ = db.list_playlist_items(second.id)
+    assert first_items[0].id == second_items[0].id
+
+    db.reconcile_playlist_items(first.id, [])
+    removed, _ = db.list_playlist_items(first.id)
+    assert removed[0].active is False
+    assert db.list_playlist_items(second.id)[0][0].active is True
+    db.close()
+
+
+def test_clear_jobs_preserves_tracked_playlist_and_inventory(tmp_path):
+    """Verify history cleanup retains tracking definitions and current membership."""
+    from media_dl.playlist import PlaylistEntry
+
+    db = Database(tmp_path / "state.sqlite")
+    job, _ = db.add_job(
+        Source.SPOTIFY,
+        "https://open.spotify.com/playlist/abc",
+        "https://open.spotify.com/playlist/abc",
+    )
+    playlist = db.ensure_playlist(job, tracked=True)
+    db.reconcile_playlist_items(
+        playlist.id,
+        [
+            PlaylistEntry(
+                source=Source.SPOTIFY,
+                provider_id="track",
+                url="https://open.spotify.com/track/track",
+                title="Song",
+                artist="Artist",
+                position=1,
+            )
+        ],
+    )
+
+    assert db.clear_jobs() == 1
+    preserved = db.get_playlist(playlist.id)
+    assert preserved.tracked is True
+    assert preserved.job_id is None
+    assert db.list_playlist_items(playlist.id)[1] == 1
+    db.close()
+
+
+def test_persistent_work_dedupes_and_recovers(tmp_path):
+    """Verify one active work request per job and restart recovery."""
+    db = Database(tmp_path / "state.sqlite")
+    job, _ = db.add_job(Source.YOUTUBE, "raw", "normalized")
+    assert db.enqueue_work(job.id) is True
+    assert db.enqueue_work(job.id) is False
+
+    work = db.claim_work()
+    assert work is not None
+    assert work.job_id == job.id
+    db.mark_running(job.id)
+    assert db.recover_work() == 1
+    assert db.get_job(job.id).status == "retry"
+    recovered = db.claim_work()
+    assert recovered is not None
+    assert recovered.id == work.id
+    db.finish_work(recovered.id)
+    db.close()

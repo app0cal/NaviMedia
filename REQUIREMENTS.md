@@ -1,261 +1,139 @@
-# Requirements
+# Playlist Tracking Integration
 
-## 1. Architecture Decision
+This document is the implementation roadmap and acceptance contract for playlist
+inventory, recurring tracking, and live dashboard updates. Complete and verify each
+phase before starting the next one.
 
-- The long-running Docker service is API/dashboard-first.
-  - It starts with `media-dl serve`.
-  - It does not poll queue files automatically.
-  - It does not start downloads unless a CLI command, API request, or dashboard action asks it to.
-- Docker remains the runtime boundary.
-  - Host users should not need local downloader dependencies.
-  - The service owns `yt-dlp`, `spotDL`, `ffmpeg`, Deno, Python dependencies, and mounted storage paths.
-- Localhost-only exposure is the default.
-  - Compose binds `127.0.0.1:${SERVICE_PORT:-8765}:${SERVICE_PORT:-8765}`.
-  - Multi-user auth and LAN exposure are out of scope for v1.
+## Fixed Boundaries
 
-## 2. Completed Features
+- Support public and unlisted YouTube, YouTube Music, and Spotify playlists that the
+  existing provider tools can access without new credentials.
+- Keep the service single-user, localhost-only, and limited to one download worker.
+- Never delete local media when a song is removed from a source playlist.
+- Add tracking controls to the dashboard and API only. Do not add tracking CLI commands.
+- Use server-sent events (SSE) for live dashboard updates. Inbound and outbound
+  automation webhooks are out of scope.
 
-### 2.1 Docker Service Runtime
+## Phase 1: Playlist Inventory and Song Details
 
-- Docker Compose builds and runs the `downloader` service as `navidrome-media-dl`.
-- The service hosts FastAPI and the React dashboard on the same localhost port.
-- Runtime endpoints exist:
-  - `GET /api/health`
-  - `GET /api/runtime`
-- The mounted storage model is:
-  - `/music`
-  - `/state`
-  - `/queue`
-  - `/downloads`
-  - `/config`
-- Download concurrency protection uses `/state/media-dl.lock`.
-  - This prevents overlapping downloads across the service container and one-off `docker compose run` containers sharing the same state mount.
+### SQLite foundation
 
-### 2.2 Downloader Core
+- [x] Add persistent playlist, canonical media-item, and playlist-membership records.
+- [x] Extend jobs with playlist/media identity and a job kind.
+- [x] Migrate every database shape supported by the current application without losing
+      existing job history.
+- [x] Allow one canonical media item to appear in multiple playlists without duplicating
+      its download.
 
-- URL classification supports:
-  - YouTube
-  - YouTube Music
-  - Spotify
-  - unsupported URL errors
-- SQLite job state stores:
-  - raw and normalized URLs
-  - source
-  - status
-  - attempts
-  - errors and warnings
-  - output path
-  - dedupe state
-  - duplicate metadata
-  - parent/child playlist summary fields
-- YouTube downloads use `yt-dlp`.
-  - Audio extraction, source metadata embedding, source thumbnails, default thumbnails, and no-thumbnail mode are supported.
-  - Normal YouTube jobs use `/state/yt-dlp.archive`.
-  - Forced duplicates bypass the archive.
-- Spotify downloads use `spotDL`.
-  - Spotify is used as catalog/metadata source.
-  - Matched audio comes from YouTube/YouTube Music.
-- Finished playlists with unavailable items can complete with a warning when unrelated downloaded items completed.
+### Provider inventory
 
-### 2.3 Runtime Settings And Planning
+- [x] Detect playlist URLs separately from individual media URLs.
+- [x] Inventory YouTube playlists with flat `yt-dlp` JSON.
+- [x] Inventory Spotify playlists with `spotdl save <url> --save-file -`.
+- [x] Normalize provider ID, URL, title, artist, and position.
+- [x] Reconcile successful inventories atomically, marking missing entries removed and
+      reactivating returning entries without deleting files.
+- [x] Preserve the last successful membership if provider extraction fails.
 
-- Runtime settings persist to `/state/runtime-settings.json`.
-- Dashboard/API settings include:
-  - audio format
-  - thumbnail mode
-  - output layout
-  - metadata mode
-  - playlist handling
-- Shared planning models exist:
-  - `DownloadPlan`
-  - `OutputLayout`
-  - `MetadataPolicy`
-  - `PlaylistPolicy`
-- Default output layout is Navidrome-oriented:
-  - `output_layout=artist_album_folders`
-  - YouTube falls back to creator folders when album metadata is unavailable.
-  - Source folders remain available as legacy/provenance mode.
-- Metadata cleanup is complete for supported audio formats.
-  - `metadata_mode=navidrome_clean` is the default.
-  - Missing artist falls back to `Unknown Artist`.
-  - Missing title falls back to the filename stem.
-  - Missing album artist copies artist.
-  - Missing album is left blank.
-  - Cleanup warnings do not fail otherwise successful jobs.
+### API and dashboard
 
-### 2.4 Playlist Expansion
+- [x] Inventory every submitted playlist, whether tracked or one-time.
+- [x] Expose paginated playlist items through the API.
+- [x] Add playlist identity and inventory state to job responses.
+- [x] Add an expandable item list to playlist job rows with title, artist, position,
+      membership state, download state, and errors.
+- [x] For single-job downloads, show the truthful overall batch result rather than
+      claiming exact per-item success.
 
-- `playlist_mode=single_job` preserves legacy single-job playlist downloads.
-- `playlist_mode=expand_items` supports YouTube and YouTube Music playlists.
-- Expansion behavior:
-  - Parent playlist job runs flat `yt-dlp` extraction.
-  - One queued child job is created per new extracted video URL.
-  - Existing child URLs are counted as duplicates and are not attached.
-  - Parent completes as a summary row with child counts.
-  - Child jobs process later through manual run or normal job actions.
-- Spotify playlists intentionally keep single-job behavior until Spotify-specific expansion is designed.
+### Phase 1 verification
 
-### 2.5 API, CLI, And Dashboard
+- [x] Test migrations, parsing, reconciliation, shared items, removal/reappearance,
+      failure preservation, pagination, and response serialization.
+- [x] Run the complete Python test suite and the frontend production build.
+- [x] Verify expandable playlist rows at desktop and mobile widths.
 
-- Shared job workflow functions back both API and container CLI:
-  - add URL
-  - retry
-  - skip
-  - list jobs
-  - import queue files
-  - run queued jobs
-  - clear history
-- Container-internal CLI commands exist:
-  - `add`
-  - `status`
-  - `retry`
-  - `skip`
-  - `run-once`
-  - `import-queue`
-  - `clear-history --yes`
-  - `watch`
-  - `serve`
-- Dashboard supports:
-  - URL submission
-  - queue-only toggle
-  - forced duplicate toggle
-  - runtime settings
-  - paginated job history
-  - parent/child playlist context
-  - manual run
-  - retry
-  - skip
-  - queue import
-  - clear history
-- Clear history deletes:
-  - SQLite job history
-  - URL dedupe history
-  - `/state/yt-dlp.archive`
-- Clear history preserves:
-  - music files
-  - runtime settings
-  - queue files
-  - config files
+## Phase 2: Tracking, Scheduler, and Background Work
 
-### 2.6 Tests And Verification
+### Persistent work queue
 
-- Unit-style tests cover:
-  - URL classification
-  - SQLite schema migration and dedupe
-  - clear-history behavior
-  - downloader command construction
-  - thumbnail modes
-  - metadata cleanup
-  - playlist extraction parsing
-  - worker behavior
-  - runtime settings
-  - API endpoints
-  - container-internal CLI safety checks
-  - host CLI API commands and slash-command dispatch
-- Regular verification path:
-  - `python -m compileall src tests`
-  - Docker pytest suite
-  - `npm run build`
-  - `docker compose build downloader`
+- [x] Add persistent work records for playlist checks and downloads.
+- [x] Prevent duplicate pending/running work for the same operation and target.
+- [x] Recover interrupted work after restart.
+- [x] Start one service-owned worker through the FastAPI lifespan and continue using the
+      existing filesystem download lock.
+- [x] Leave queue-only jobs idle until an explicit manual run.
 
-## 3. Current CLI State
+### Asynchronous execution
 
-### 3.1 Host CLI Tool
+- [x] Make service submissions, retries, manual runs, and playlist checks enqueue work
+      and return promptly.
+- [x] Keep container-internal CLI execution synchronous.
+- [x] Update host CLI output to report queued API work without adding tracking commands.
 
-- Repo-owned host wrapper executable exists at `bin/media-dl`.
-- It can be run from the repo or symlinked into `~/.local/bin/media-dl`.
-- It lets users run downloader operations without typing `docker compose run`.
-- With no arguments it opens a simple slash-command shell.
-- API-backed commands include:
-  - `add`
-  - `status`
-  - `run`
-  - `import-queue`
-  - `retry`
-  - `skip`
-  - `settings`
-  - `set`
-  - `clear-history -f`
-- Docker lifecycle commands include:
-  - `up`
-  - `down`
-  - `rebuild`
-  - `logs`
-- Utilities include:
-  - `open`
-  - `doctor`
-- `doctor` checks Docker, Compose, service health, runtime paths, and container tools.
-- If an API-backed command runs while the service is down in an interactive terminal, the CLI offers to start Compose and retry.
+### Tracked playlist scheduling
 
-### 3.2 Real-World Validation
+- [x] Add tracking state, pause state, interval, last-check, last-success, next-check,
+      and latest-error fields.
+- [x] Add a submit-time Track playlist toggle that is valid only for playlists,
+      incompatible with Queue only, weekly by default, and queues the initial inventory.
+- [x] Support daily, weekly, 30-day monthly, and custom whole-hour/day intervals from
+      one hour through 365 days. Store schedule timestamps in UTC.
+- [x] Always use item-level jobs for tracked playlists, regardless of the global
+      playlist handling setting.
+- [x] On each check, queue newly discovered and failed items while skipping successful
+      items.
+- [x] Calculate the next run from check completion. Run now resets that baseline.
+- [x] Queue one catch-up check for each overdue playlist after restart.
+- [x] Support Run now, Pause/Resume, schedule editing, and Stop tracking.
+- [x] Preserve tracked definitions, schedules, current membership, and media state when
+      clearing job history.
 
-- Validate `metadata_mode=navidrome_clean` with real YouTube, YouTube Music, and Spotify downloads.
-- Validate output layout with real album/artist metadata gaps.
-- Add source-specific metadata extraction improvements only after real edge cases appear.
-- Keep metadata cleanup separate from command generation.
+### Tracking API and dashboard
 
-### 3.3 Documentation And Troubleshooting
+- [x] Extend job submission with tracking options.
+- [x] Expose tracked-playlist listing, editing, and Run now endpoints.
+- [x] Add a pinned Tracked playlists section above paginated job history.
 
-- Keep README aligned with current UI/API/CLI behavior.
-- Keep troubleshooting notes current for:
-  - service not running
-  - port already in use
-  - stale browser bundle
-  - bind-mounted state surviving `down -v`
-  - YouTube unavailable videos
-  - Spotify bad matches
-  - Navidrome scan delay
-  - missing default artwork
+### Phase 2 verification
 
-## 4. Dependency Graph
+- [x] Test queue ordering, duplicate prevention, recovery, and single-worker behavior.
+- [x] Test initial and incremental downloads, retry behavior, shared-item dedupe, and
+      removed-item retention.
+- [x] Test schedule calculations, pause/resume, Run now, overdue recovery, validation,
+      endpoints, and clear-history preservation.
+- [x] Run the complete Python suite, frontend build, Docker build, and restart smoke test.
 
-```text
-Docker Compose service [complete]
-+-- Existing Python downloader core [complete]
-+-- Existing mounted storage model [complete]
-+-- FastAPI API runtime [complete]
-|   +-- Health/runtime endpoints [complete]
-|   +-- Job API endpoints [complete]
-|   +-- Settings endpoints [complete]
-|   +-- Clear-history endpoint [complete]
-+-- Shared service layer [complete]
-|   +-- SQLite jobs [complete]
-|   +-- URL classification [complete]
-|   +-- yt-dlp runner [complete]
-|   +-- spotDL runner [complete]
-|   +-- Playlist expansion [complete]
-|   +-- API/CLI orchestration functions [complete]
-+-- React/Vite web UI [complete]
-|   +-- Localhost job API [complete]
-|   +-- Runtime settings UI [complete]
-|   +-- Parent/child job display [complete]
-|   +-- Clear-history action [complete]
-+-- Download planning interface [complete]
-|   +-- Navidrome metadata cleanup [complete]
-|   +-- Artist/album output layout [complete]
-|   +-- Creator-folder fallback [complete]
-+-- Host CLI wrapper [complete]
-    +-- Docker Compose lifecycle commands [complete]
-    +-- Localhost API job commands [complete]
-    +-- Slash-command shell [complete]
-    +-- Doctor checks [complete]
-```
+## Phase 3: Live Updates Through SSE
 
-## 5. Recommended Build Order
+### Backend event stream
 
-1. Documentation and code comment refresh.
-2. Host CLI wrapper lifecycle commands.
-3. Host CLI API-backed job commands.
-4. Host CLI `doctor` and smoke checks.
-5. Real-world metadata/output validation.
+- [x] Publish job, playlist, and media-item change notifications in-process.
+- [x] Expose `GET /api/events` as an SSE stream with compact record identifiers and
+      periodic heartbeats.
+- [x] Clean up disconnected subscribers and never block worker execution on an SSE
+      client.
+- [x] Keep REST endpoints authoritative; SSE only signals when to reload them.
 
-## 6. Out Of Scope For V1
+### Dashboard integration
 
-- Background polling in the long-running service.
-- Multi-user authentication.
-- LAN or internet exposure.
-- Multiple concurrent download workers.
-- Direct Spotify audio extraction.
-- Navidrome database writes.
-- Automatic bad-match correction for Spotify.
-- Public Python package release.
+- [x] Open one `EventSource` connection.
+- [x] Debounce notifications and reload only affected data.
+- [x] Perform a full REST refresh after connecting or reconnecting.
+- [x] Retain the explicit Refresh action and usable behavior while SSE is unavailable.
+
+### Phase 3 verification
+
+- [x] Test event delivery, heartbeats, subscriber cleanup, and reconnect recovery.
+- [x] Verify downloads and scheduled checks never wait on SSE clients.
+- [x] Run the complete Python suite and frontend production build.
+- [x] Smoke-test live updates during a complete playlist inventory and download flow.
+
+## Final Integration
+
+- [ ] Validate one YouTube and one Spotify tracked playlist through initial download,
+      incremental update, pause/resume, restart recovery, and live UI updates.
+- [x] Update README and API documentation with interval behavior, playlist visibility
+      limits, retained removed files, asynchronous responses, clear-history behavior,
+      and SSE reconnection.
+- [x] Run the complete Python suite, frontend build, Docker image build, and Compose
+      startup checks.

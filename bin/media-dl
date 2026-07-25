@@ -230,7 +230,10 @@ def run_api_command(ctx: Context, args: argparse.Namespace) -> int:
         return 0
     if args.command == "run":
         result = client.run_jobs(args.max_jobs)
-        print(f"processed {result['processed']} job(s)")
+        if "queued" in result:
+            print(f"queued {result['queued']} job(s)")
+        else:
+            print(f"processed {result['processed']} job(s)")
         return 0
     if args.command == "import-queue":
         result = client.import_queue()
@@ -523,6 +526,8 @@ def print_add_result(result: dict[str, Any]) -> None:
     if result["created"] and job.get("allow_duplicate"):
         verb = "queued duplicate"
     print(f"{verb}: job {job['id']} {job['source']} {job['normalized_url']}")
+    if result.get("accepted"):
+        print("accepted for background processing")
     processed = result.get("processed")
     if processed:
         print(f"processed: job {processed['id']} {processed['status']}")
