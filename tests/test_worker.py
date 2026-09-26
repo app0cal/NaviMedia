@@ -1,5 +1,7 @@
 """Tests for worker job processing, settings usage, and playlist expansion."""
 
+import logging
+
 from media_dl.config import Config
 from media_dl.db import Database
 from media_dl.downloader import DownloadResult
@@ -7,6 +9,35 @@ from media_dl.playlist import PlaylistEntry, PlaylistItems
 from media_dl.urltools import Source
 from media_dl.worker import process_job, run_once
 from media_dl.runtime_settings import save_runtime_settings
+
+
+def test_process_job_logs_download_failure_and_preserves_error(tmp_path, monkeypatch, caplog):
+    """Expose captured downloader errors in logs as well as the job database."""
+    cfg = Config(
+        music_root=tmp_path / "music",
+        state_dir=tmp_path / "state",
+        queue_dir=tmp_path / "queue",
+        download_dir=tmp_path / "downloads",
+    )
+    db = Database(cfg.db_path)
+    url = "https://youtu.be/kXC8kzgY9tw"
+    job, _ = db.add_job(Source.YOUTUBE, url, url)
+    db.close()
+    error = "[info] Downloading 1 format(s): 251\nERROR: unable to download video data: HTTP Error 403: Forbidden"
+
+    def fail_download(self, job):
+        raise RuntimeError(error)
+
+    monkeypatch.setattr("media_dl.downloader.Downloader.run", fail_download)
+    with caplog.at_level(logging.INFO, logger="media_dl.worker"):
+        processed = process_job(cfg, job.id)
+
+    assert processed.status == "failed"
+    assert processed.last_error == error
+    assert f"Job {job.id} started: source=youtube" in caplog.text
+    assert f"Job {job.id} failed: source=youtube" in caplog.text
+    assert error in caplog.text
+    assert f"Job {job.id} complete" not in caplog.text
 
 
 def test_process_job_ignores_completed_job(tmp_path):

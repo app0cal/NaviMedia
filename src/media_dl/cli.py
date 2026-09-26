@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 
 from media_dl.config import load_config
@@ -69,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("serve", help="serve localhost API")
 
     args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     config = load_config()
     config.ensure_dirs()
 

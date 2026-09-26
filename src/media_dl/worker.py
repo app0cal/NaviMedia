@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import logging
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -27,6 +28,7 @@ from media_dl.urltools import Source, classify_url
 
 
 _download_lock = Lock()
+logger = logging.getLogger(__name__)
 
 
 def process_job(config: Config, job_id: int):
@@ -93,6 +95,7 @@ def _process_job_with_db(db: Database, downloader: Downloader, job_id: int):
         return job
 
     db.mark_running(job.id)
+    logger.info("Job %s started: source=%s url=%s", job.id, job.source.value, job.normalized_url)
     try:
         if is_playlist_url(job.normalized_url):
             _process_playlist_job(db, downloader, job)
@@ -104,8 +107,14 @@ def _process_job_with_db(db: Database, downloader: Downloader, job_id: int):
         if playlist is not None:
             db.mark_playlist_check_failed(playlist.id, str(exc))
         db.mark_failed(job.id, str(exc))
+        logger.error("Job %s failed: source=%s\n%s", job.id, job.source.value, exc)
     processed = db.get_job(job.id)
     db.sync_media_for_job(job.id)
+    if processed.status != "failed":
+        if processed.last_warning:
+            logger.warning("Job %s %s: %s", job.id, processed.status, processed.last_warning)
+        else:
+            logger.info("Job %s %s", job.id, processed.status)
     return processed
 
 

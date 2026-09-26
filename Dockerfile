@@ -16,7 +16,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir "yt-dlp[default]" spotdl
+# 2026.08.19 replaces the android_vr default client that now returns HTTP 403.
+# Keep EJS in sync with yt-dlp through its default dependency group.
+RUN pip install --no-cache-dir --upgrade "yt-dlp[default]>=2026.08.19" spotdl \
+    && pip check
 
 WORKDIR /app
 COPY pyproject.toml README.md ./

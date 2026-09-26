@@ -239,6 +239,59 @@ Service job actions are asynchronous: successful responses report accepted/queue
   `.env` to `id -u` and `id -g`, then repair older files with
   `docker exec -u 0 navidrome-media-dl chown -R "$(id -u):$(id -g)" /music /state /queue /downloads /config`.
 
+### YouTube HTTP 403 after metadata or thumbnail succeeds
+
+If yt-dlp resolves the video ID and saves its thumbnail but reports `unable to
+download video data: HTTP Error 403: Forbidden`, the failure is fetching the media
+stream. This does not by itself indicate a bad `youtu.be` URL or missing account
+credentials. The `--paths is ignored` warning concerns temporary file placement
+with the absolute output template; it does not cause the HTTP rejection.
+
+yt-dlp 2026.07.04 uses `android_vr` among its default YouTube clients. Upstream
+[removed that client after playback started returning 403](https://github.com/yt-dlp/yt-dlp/pull/17461)
+and included the fix in [2026.08.19](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.08.19).
+The Dockerfile now requires at least that release, with its matching EJS solver
+dependencies. Deno is already included and enabled by the download command.
+
+After updating the checkout on the Docker host, rebuild the image and recreate
+the service. A normal cached build can retain old downloader packages; `pip
+--no-cache-dir` does not disable Docker's layer cache.
+
+```bash
+docker compose build --pull --no-cache downloader
+docker compose up -d --force-recreate downloader
+docker compose exec downloader yt-dlp --version
+```
+
+Then retry the failed job in the dashboard. There is no need to clear history or
+the download archive. These commands use this repository's Compose service name;
+for a custom deployment, use its corresponding service/build configuration.
+
+To diagnose continued failures, run the following inside the deployed container
+(replace `navidrome-media-dl` if you renamed it):
+
+```bash
+docker exec navidrome-media-dl sh -c 'deno --version; python -m pip show yt-dlp yt-dlp-ejs spotdl; yt-dlp --ignore-config --verbose --js-runtimes deno --check-formats -f bestaudio --simulate "https://youtu.be/kXC8kzgY9tw"'
+```
+
+`--check-formats --simulate` probes media access without saving a library file;
+a successful small probe does not establish that the full download works. Test
+the full job afterward. The verbose output identifies the runtime, solver,
+player clients, and any token warnings. If current clients still fail, follow
+the upstream [PO Token guide](https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide)
+for client-specific requirements; a PO Token is distinct from account login
+cookies, and the presence of a 403 alone does not establish either is needed.
+
+Job start, completion, warning, and failure messages are written to the container
+logs. Failure messages include captured downloader output, which also remains in
+the dashboard's job error. Output is reported when the downloader exits, rather
+than streamed as progress. API `200 OK` responses mean the request succeeded;
+queued downloads can fail later in the background worker.
+
+```bash
+docker compose logs --since 10m --follow downloader
+```
+
 ## Notes
 
 - Use this only for media you are allowed to download and store.
